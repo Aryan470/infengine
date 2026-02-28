@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(MyProject LANGUAGES C CXX CUDA)
+project(InfEngine LANGUAGES C CXX CUDA)
 
 # C++/CUDA standard
 set(CMAKE_CXX_STANDARD 17)
