@@ -1,6 +1,7 @@
 #include <tokenizers_cpp.h>
 #include "manager.h"
 #include "kernel.cuh"
+#include "kernels/rope.cuh"
 #include "config.h"
 #include <fstream>
 #include <iostream>
@@ -11,6 +12,12 @@ Manager::Manager() {
     std::string json_blob((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
     std::cout << "Loading tokenizer..." << std::endl;
     tokenizer = tokenizers::Tokenizer::FromBlobJSON(json_blob);
+    std::cout << "Precomputing RoPE..." << std::endl;
+    init_rope_buffer(&cu_rope_cos, &cu_rope_sin);
+}
+
+Manager::~Manager() {
+    cleanup_rope_buffer(cu_rope_cos, cu_rope_sin);
 }
 
 

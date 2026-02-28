@@ -15,5 +15,5 @@ namespace InfEngineConfig {
     static const int HEAD_DIM = 128;
     static const int FFN_DIM = 14336;
 
-    static const int FLOAT_SIZE = 2;
+    static const int HALF_SIZE = 2;
 }

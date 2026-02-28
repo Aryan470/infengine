@@ -11,15 +11,15 @@ TEST(RMSNorm, MatchesPyTorch) {
     std::vector<__half> actual(expected.size());
 
     int seq_len = input.size() / InfEngineConfig::HIDDEN_SIZE;
-    const int output_size_bytes = InfEngineConfig::FLOAT_SIZE * expected.size();
+    const int output_size_bytes = InfEngineConfig::HALF_SIZE * expected.size();
 
     __half* d_input;
     __half* d_weight;
     __half* d_actual;
-    cudaMalloc(&d_input, InfEngineConfig::FLOAT_SIZE * input.size());
-    cudaMemcpy(d_input, input.data(), InfEngineConfig::FLOAT_SIZE * input.size(), cudaMemcpyHostToDevice);
-    cudaMalloc(&d_weight, InfEngineConfig::FLOAT_SIZE * weight.size());
-    cudaMemcpy(d_weight, weight.data(), InfEngineConfig::FLOAT_SIZE * weight.size(), cudaMemcpyHostToDevice);
+    cudaMalloc(&d_input, InfEngineConfig::HALF_SIZE * input.size());
+    cudaMemcpy(d_input, input.data(), InfEngineConfig::HALF_SIZE * input.size(), cudaMemcpyHostToDevice);
+    cudaMalloc(&d_weight, InfEngineConfig::HALF_SIZE * weight.size());
+    cudaMemcpy(d_weight, weight.data(), InfEngineConfig::HALF_SIZE * weight.size(), cudaMemcpyHostToDevice);
     cudaMalloc(&d_actual, output_size_bytes);
 
     // needs to be launched with 

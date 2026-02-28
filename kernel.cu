@@ -5,7 +5,7 @@
 int initialize_request_context(RequestContext* context) {
 	// alloc token buffer, kv cache on gpu
 	cudaMalloc(&context->cu_token_buffer, InfEngineConfig::MAX_CONTEXT_LENGTH * sizeof(int));
-	const size_t kv_cache_size = (size_t) (InfEngineConfig::MAX_CONTEXT_LENGTH) * InfEngineConfig::NUM_LAYERS * InfEngineConfig::NUM_KV_HEADS * 2 * InfEngineConfig::HEAD_DIM * InfEngineConfig::FLOAT_SIZE;
+	const size_t kv_cache_size = (size_t) (InfEngineConfig::MAX_CONTEXT_LENGTH) * InfEngineConfig::NUM_LAYERS * InfEngineConfig::NUM_KV_HEADS * 2 * InfEngineConfig::HEAD_DIM * InfEngineConfig::HALF_SIZE;
 	cudaMalloc(&context->cu_kv_cache_buffer, kv_cache_size);
 	cudaMemcpy(context->cu_token_buffer, context->tokens.data(), context->tokens.size() * sizeof(int), cudaMemcpyHostToDevice);
 	return 0;
