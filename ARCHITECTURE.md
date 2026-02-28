@@ -1,0 +1,13 @@
+- main.cpp
+    - Instantiate manager which loads model weights and sets up runtime
+    - Hardcoded input, print(manager.fulfill(input))
+- manager.cpp: given a request string, return a result string
+    - model weights loaded into VRAM at startup
+    - tokenize it, create a request obj (which allocs kv and token buffer on gpu)
+    - call prefill and decode in a loop which operate on the kv/token buffer
+- tokenizer.cpp: we will use tokenizers-cpp
+- model.cpp:
+    - prefill: given a kvcache buffer and token buffer, fill kvcache
+    - decode: given kvcache+token buff, generate 1 new token
+- kernels...
+- use cuBLAS for matmuls
