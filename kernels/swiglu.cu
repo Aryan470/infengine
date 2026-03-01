@@ -25,7 +25,7 @@ __global__ void swiglu_kern(int seq_len, half* d_gate, half* d_up, half* d_outpu
         // out[i] = gate[i] * (1 / (1 + e^(-gate[i]))) * up[i]
         float gate = __half2float(block_gate[i]);
         float up = __half2float(block_up[i]);
-        float result = gate * (1.0f / (1.0f + exp(-gate))) * up;
+        float result = gate * (1.0f / (1.0f + expf(-gate))) * up;
         block_output[i] = __float2half(result);
     }
 }
