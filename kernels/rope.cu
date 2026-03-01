@@ -50,8 +50,10 @@ __global__ void apply_rope_kern(int seq_len, const float* d_rope_cos, const floa
         */
         const int x = 2 * i;
         const int y = x + InfEngineConfig::HEAD_DIM / 2;
-        block_output[x] = __float2half(__half2float(block_input[x]) * my_cos[i] - __half2float(block_input[y]) * my_sin[i]);
-        block_output[y] = __float2half(__half2float(block_input[x]) * my_sin[i] + __half2float(block_input[y]) * my_cos[i]);
+        float a = __half2float(block_input[x]);
+        float b = __half2float(block_input[y]);
+        block_output[x] = __float2half(a * my_cos[i] - b * my_sin[i]);
+        block_output[y] = __float2half(a * my_sin[i] + b * my_cos[i]);
     }
 }
 

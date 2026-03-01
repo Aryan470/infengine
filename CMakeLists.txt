@@ -27,8 +27,10 @@ set_target_properties(main PROPERTIES
     CUDA_ARCHITECTURES "120"
 )
 
+find_package(CUDAToolkit REQUIRED)
+
 target_include_directories(main PRIVATE ${TOKENIZER_CPP_PATH}/include)
-target_link_libraries(main PRIVATE tokenizers_cpp)
+target_link_libraries(main PRIVATE tokenizers_cpp CUDA::cublas)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # CMakeLists.txt
@@ -51,7 +53,7 @@ file(GLOB TEST_SOURCES
 
 add_executable(test_kernels ${TEST_SOURCES})
 
-target_link_libraries(test_kernels GTest::gtest_main ${CUDA_LIBRARIES})
+target_link_libraries(test_kernels GTest::gtest_main CUDA::cublas ${CUDA_LIBRARIES})
 
 include(GoogleTest)
 gtest_discover_tests(test_kernels)
