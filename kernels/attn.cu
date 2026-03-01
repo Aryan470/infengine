@@ -254,4 +254,5 @@ void attn(const float* d_rope_cos, const float* d_rope_sin, const int seq_len, h
     cudaFree(V);
     cudaFree(d_attn_weights);
     cudaFree(d_pre_proj);
+    cublasDestroy(handle);
 }
