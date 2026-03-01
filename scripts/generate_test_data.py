@@ -3,9 +3,15 @@ import torch
 from transformers import LlamaForCausalLM
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
-def save_rmsnorm_data(layer):
+N_Q_HEADS = 32
+N_KV_HEADS = 8
+HIDDEN_DIM = 4096
+HEAD_DIM = 128
+
+def save_rmsnorm_data():
     torch.manual_seed(42)
     x = torch.randn(1, 128, 4096, dtype=torch.float16)
+    layer = model.model.layers[0]
 
     # Save input
     x.detach().numpy().tofile("test_data/rmsnorm_input.bin")
@@ -66,10 +72,47 @@ def save_scale_causal_softmax_data():
     inp.to(torch.float16).detach().numpy().tofile("test_data/scalesoftmax_input.bin")
     out.to(torch.float16).detach().numpy().tofile("test_data/scalesoftmax_output.bin")
 
-if __name__ == "__main__":
-    model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B", dtype=torch.float16)
-    layer = model.model.layers[0]
+def generate_attn_inputs():
+    torch.manual_seed(42)
+    # generate inputs of form [seq_len, hidden_dim]
+    seq_len = 128
+    hidden_dim = 4096
+    return torch.randn(1, seq_len, hidden_dim, dtype=torch.float16)
 
-    save_rmsnorm_data(layer)
+
+def save_e2e_attn_data(model):
+    inp = generate_attn_inputs()
+    attn = model.model.layers[0].self_attn
+    seq_len = inp.shape[1]
+    position_ids = torch.arange(seq_len).unsqueeze(0)
+
+    attn.q_proj.weight.data.to(torch.float16).cpu().numpy().tofile("test_data/attn_qproj.bin")
+    attn.k_proj.weight.data.to(torch.float16).cpu().numpy().tofile("test_data/attn_kproj.bin")
+    attn.v_proj.weight.data.to(torch.float16).cpu().numpy().tofile("test_data/attn_vproj.bin")
+    attn.o_proj.weight.data.to(torch.float16).cpu().numpy().tofile("test_data/attn_oproj.bin")
+
+    # store intermediate
+
+    # Compute RoPE embeddings (cos, sin) from the model's rotary embedding
+    rotary_emb = model.model.rotary_emb
+    position_embeddings = rotary_emb(inp, position_ids)  # returns (cos, sin)
+
+    output, attn_weights = attn(
+        hidden_states=inp,
+        position_embeddings=position_embeddings,
+        attention_mask=None,
+    )
+
+    # save output to a bin
+    inp.to(torch.float16).detach().numpy().tofile("test_data/attn_e2e_input.bin")
+    output.to(torch.float16).detach().numpy().tofile("test_data/attn_e2e_output.bin")
+
+
+
+if __name__ == "__main__":
+    model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B", torch_dtype=torch.float16)
+
+    save_rmsnorm_data()
     save_rope_data(model)
     save_scale_causal_softmax_data()
+    save_e2e_attn_data(model)
