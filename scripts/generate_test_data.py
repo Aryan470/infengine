@@ -7,6 +7,7 @@ N_Q_HEADS = 32
 N_KV_HEADS = 8
 HIDDEN_DIM = 4096
 HEAD_DIM = 128
+FFN_DIM = 14336
 
 def save_rmsnorm_data():
     torch.manual_seed(42)
@@ -107,6 +108,18 @@ def save_e2e_attn_data(model):
     inp.to(torch.float16).detach().numpy().tofile("test_data/attn_e2e_input.bin")
     output.to(torch.float16).detach().numpy().tofile("test_data/attn_e2e_output.bin")
 
+def save_swiglu_data():
+    seq_len = 128
+    # generate two inputs: gate and up both [seq_len, FFN_DIM]
+    torch.manual_seed(42)
+    gate = torch.randn(seq_len, FFN_DIM, dtype=torch.float16)
+    up = torch.randn(seq_len, FFN_DIM, dtype=torch.float16)
+
+    # promote to float for intermediate comp
+    out = torch.nn.functional.silu(gate.float()) * up.float()
+    gate.to(torch.float16).detach().numpy().tofile("test_data/swiglu_gate.bin")
+    up.to(torch.float16).detach().numpy().tofile("test_data/swiglu_up.bin")
+    out.to(torch.float16).detach().numpy().tofile("test_data/swiglu_out.bin")
 
 
 if __name__ == "__main__":
@@ -116,3 +129,4 @@ if __name__ == "__main__":
     save_rope_data(model)
     save_scale_causal_softmax_data()
     save_e2e_attn_data(model)
+    save_swiglu_data()
