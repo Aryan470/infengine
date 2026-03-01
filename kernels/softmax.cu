@@ -53,6 +53,7 @@ __global__ void scale_causal_softmax_kern(int seq_len, half* d_input, half* d_ou
     // where we do reductions (max, sum)
     float* reduce_space = raw_shmem;
     // where we actually store data
+    // TODO: this assumes the entire seq len fits in shmem. this is not true for very long context
     half* data_space = (half*) (raw_shmem + K);
 
 
