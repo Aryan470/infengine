@@ -18,6 +18,7 @@ def save_rmsnorm_data(layer):
     normed.detach().numpy().tofile("test_data/rmsnorm_output.bin")
 
 def save_rope_data(model):
+    torch.manual_seed(42)
     seq_len = 128
     q = torch.randn(1, 32, seq_len, 128, dtype=torch.float16)
     k = torch.randn(1, 8, seq_len, 128, dtype=torch.float16)
@@ -46,6 +47,7 @@ def save_rope_data(model):
     k_rot.to(torch.float16).detach().numpy().tofile("test_data/rope_k_output.bin")
 
 def save_scale_causal_softmax_data():
+    torch.manual_seed(42)
     seq_len = 128
     q_heads = 32
     # [q_heads, seq_len, seq_len]
