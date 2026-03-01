@@ -121,6 +121,30 @@ def save_swiglu_data():
     up.to(torch.float16).detach().numpy().tofile("test_data/swiglu_up.bin")
     out.to(torch.float16).detach().numpy().tofile("test_data/swiglu_out.bin")
 
+def save_ffn_data(model):
+    torch.manual_seed(42)
+
+    seq_len = 128
+    mlp = model.model.layers[0].mlp
+
+    # (14336, 4096)
+    gate = mlp.gate_proj.weight
+    # (14336, 4096)
+    up = mlp.up_proj.weight
+    # (4096, 14336)
+    down = mlp.down_proj.weight
+    # save weights (these are fp16)
+    gate.detach().contiguous().numpy().tofile("test_data/ffn_wgate.bin")
+    up.detach().contiguous().numpy().tofile("test_data/ffn_wup.bin")
+    down.detach().contiguous().numpy().tofile("test_data/ffn_wdown.bin")
+
+    # ffn takes [seq_len, hidden_dim] -> [seq_len, hidden_dim]
+    x = torch.randn(seq_len, HIDDEN_DIM, dtype=torch.float16, device="cuda")
+    mlp.to(device="cuda")
+    out = mlp(x.to(torch.float16))
+    x.to(torch.float16).detach().cpu().numpy().tofile("test_data/ffn_in.bin")
+    out.to(torch.float16).detach().cpu().numpy().tofile("test_data/ffn_out.bin")
+
 
 if __name__ == "__main__":
     model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B", torch_dtype=torch.float16)
@@ -130,3 +154,4 @@ if __name__ == "__main__":
     save_scale_causal_softmax_data()
     save_e2e_attn_data(model)
     save_swiglu_data()
+    save_ffn_data(model)
