@@ -1,3 +1,4 @@
+import math
 import torch
 from transformers import LlamaForCausalLM
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
@@ -44,9 +45,29 @@ def save_rope_data(model):
     q_rot.to(torch.float16).detach().numpy().tofile("test_data/rope_q_output.bin")
     k_rot.to(torch.float16).detach().numpy().tofile("test_data/rope_k_output.bin")
 
+def save_scale_causal_softmax_data():
+    seq_len = 128
+    q_heads = 32
+    # [q_heads, seq_len, seq_len]
+    inp = torch.randn(q_heads, seq_len, seq_len, dtype=torch.float16)
+
+    scale = 1 / math.sqrt(128)
+    # Compute reference in float32 to avoid precision issues in the reference itself
+    scores = inp.float() * scale
+
+    # Causal mask: positions where col > row get -inf
+    mask = torch.triu(torch.full((seq_len, seq_len), float('-inf')), diagonal=1)
+    scores = scores + mask
+
+    out = torch.nn.functional.softmax(scores, dim=-1)
+
+    inp.to(torch.float16).detach().numpy().tofile("test_data/scalesoftmax_input.bin")
+    out.to(torch.float16).detach().numpy().tofile("test_data/scalesoftmax_output.bin")
+
 if __name__ == "__main__":
     model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B", dtype=torch.float16)
     layer = model.model.layers[0]
 
     save_rmsnorm_data(layer)
     save_rope_data(model)
+    save_scale_causal_softmax_data()
