@@ -2,7 +2,9 @@
 #include "lm_head.cuh"
 #include "multiply_by_weight.cuh"
 
-void lm_head(half* d_input, half* d_weight, half* d_output) {
+void lm_head(const int seq_len, half* d_input, half* d_weight, half* d_output) {
+    // offset the input by seq_len for the user
+    d_input += (seq_len-1) * InfEngineConfig::HIDDEN_SIZE;
     cublasHandle_t handle;
     cublasCreate(&handle);
 

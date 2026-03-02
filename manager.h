@@ -1,6 +1,7 @@
 #pragma once
 #include <tokenizers_cpp.h>
 #include <optional>
+#include "kernels/model_weights.cuh"
 
 class Manager {
     public:
@@ -12,9 +13,7 @@ class Manager {
         std::vector<int> tokenize(const std::string& text);
         std::string detokenize(const std::vector<int>& tokens);
         std::unique_ptr<tokenizers::Tokenizer> tokenizer;
-        int* cu_model_weights;
-        float* cu_rope_cos;
-        float* cu_rope_sin;
+        ModelWeights model_weights;
 };
 
 struct RequestContext {
