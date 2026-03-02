@@ -60,6 +60,7 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
     cublasCreate(&handle);
     cudaProfilerStart();
 
+    std::cout << request;
     for (int num_tokens = 0; num_tokens < 100; num_tokens++) {
         int seq_len = context.tokens.size();
         cudaMemcpy(tokenid_buff, context.tokens.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice);
@@ -99,8 +100,11 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
         int final_token;
         cudaMemcpy(&final_token, output_token, sizeof(int), cudaMemcpyDeviceToHost);
         context.tokens.push_back(final_token);
-        printf("step %d: token_id = %d\n", num_tokens, final_token);
+        std::string token_str = tokenizer->Decode({final_token});
+        std::cout << token_str;
+        fflush(stdout);
     }
+    std::cout << std::endl;
     cudaProfilerStop();
     cudaEventRecord(endEvent, 0);
     cudaEventSynchronize(endEvent);
