@@ -28,9 +28,11 @@ set_target_properties(main PROPERTIES
 )
 
 find_package(CUDAToolkit REQUIRED)
+FetchContent_Declare(json URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz)
+FetchContent_MakeAvailable(json)
 
 target_include_directories(main PRIVATE ${TOKENIZER_CPP_PATH}/include)
-target_link_libraries(main PRIVATE tokenizers_cpp CUDA::cublas)
+target_link_libraries(main PRIVATE tokenizers_cpp CUDA::cublas nlohmann_json::nlohmann_json)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # CMakeLists.txt
@@ -53,7 +55,7 @@ file(GLOB TEST_SOURCES
 
 add_executable(test_kernels ${TEST_SOURCES})
 
-target_link_libraries(test_kernels GTest::gtest_main CUDA::cublas ${CUDA_LIBRARIES})
+target_link_libraries(test_kernels GTest::gtest_main CUDA::cublas nlohmann_json::nlohmann_json ${CUDA_LIBRARIES})
 
 include(GoogleTest)
 gtest_discover_tests(test_kernels)
