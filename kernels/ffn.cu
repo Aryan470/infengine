@@ -32,27 +32,27 @@ void multiply_by_weight(cublasHandle_t handle, const int m, const int k, const i
         CUBLAS_GEMM_DEFAULT);
 }
 
-void ffn(cublasHandle_t handle, const int seq_len, half* d_in, half* d_out, half* d_wup, half* d_wdown, half* d_wgate) {
+size_t ffn_workspace_size(int max_seq_len) {
+    return 2 * (size_t)max_seq_len * InfEngineConfig::FFN_DIM * sizeof(half);
+}
+
+void ffn(cublasHandle_t handle, const int seq_len, half* d_in, half* d_out, half* d_wup, half* d_wdown, half* d_wgate, void* workspace) {
     // x = input [seq_len, hidden_dim]
     // Wg is [ffn_dim, hidden_dim]
     // Wup is [ffn_dim, hidden_dim]
     // Wdown is [hidden_dim, ffn_dim]
 
-
     // G = x @ Wg^t [seq_len, ffn_dim]
     // U = x @ Wu^t [seq_len, ffn_dim]
 
-    // we need 2 buffers for [seq_len, ffn_dim]
-    half* d_G;
-    half* d_U;
-    const int buffer_size = seq_len * InfEngineConfig::FFN_DIM * sizeof(half);
-    cudaMalloc(&d_G, buffer_size);
-    cudaMalloc(&d_U, buffer_size);
+    // unpack workspace into 2 buffers for [seq_len, ffn_dim]
+    half* d_G = (half*)workspace;
+    half* d_U = d_G + seq_len * InfEngineConfig::FFN_DIM;
 
     // x = [seq_len, hidden_dim], W = [ffn_dim, hidden_dim] -> m = seq_len, k = hidden_dim, n = ffn_dim
     multiply_by_weight(handle, seq_len, InfEngineConfig::HIDDEN_SIZE, InfEngineConfig::FFN_DIM, d_in, d_wup, d_U);
     multiply_by_weight(handle, seq_len, InfEngineConfig::HIDDEN_SIZE, InfEngineConfig::FFN_DIM, d_in, d_wgate, d_G);
-    
+
     // reuse G buffer for SwiGLU: G' = SwiGLU(G, U)
     swiglu(seq_len, d_G, d_U, d_G);
 
@@ -61,5 +61,4 @@ void ffn(cublasHandle_t handle, const int seq_len, half* d_in, half* d_out, half
     multiply_by_weight(handle, seq_len, InfEngineConfig::FFN_DIM, InfEngineConfig::HIDDEN_SIZE, d_G, d_wdown, d_out);
 
     // output [seq_len, hidden_dim]
-    cudaFree(d_G); cudaFree(d_U);
 }

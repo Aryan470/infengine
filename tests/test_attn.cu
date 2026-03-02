@@ -52,8 +52,10 @@ TEST(Attention, MatchesPyTorch) {
     float* d_rope_sin;
     init_rope_buffer(&d_rope_cos, &d_rope_sin);
 
-    // needs to be launched with 
-    attn(handle, d_rope_cos, d_rope_sin, seq_len, d_input, d_Wq, d_Wk, d_Wv, d_Wo, d_actual);
+    void* workspace;
+    cudaMalloc(&workspace, attn_workspace_size(seq_len));
+
+    attn(handle, d_rope_cos, d_rope_sin, seq_len, d_input, d_Wq, d_Wk, d_Wv, d_Wo, d_actual, workspace);
     cudaMemcpy(actual.data(), d_actual, output_size_bytes, cudaMemcpyDeviceToHost);
 
     CompareResult result = compare_tensors(actual.data(), expected.data(), expected.size(), 1e-3);
@@ -61,6 +63,7 @@ TEST(Attention, MatchesPyTorch) {
     EXPECT_LT(result.max_abs_err, 3e-3);
     EXPECT_GT(result.pct_within_tol, 99.9);
 
+    cudaFree(workspace);
     cudaFree(d_input);
     cudaFree(d_Wk);
     cudaFree(d_Wq);

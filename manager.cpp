@@ -60,6 +60,11 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
     cublasCreate(&handle);
     cudaProfilerStart();
 
+    int max_seq_len = context.tokens.size() + 100;
+    size_t workspace_bytes = std::max(attn_workspace_size(max_seq_len), ffn_workspace_size(max_seq_len));
+    void* workspace;
+    cudaMalloc(&workspace, workspace_bytes);
+
     std::cout << request;
     for (int num_tokens = 0; num_tokens < 100; num_tokens++) {
         int seq_len = context.tokens.size();
@@ -70,13 +75,13 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
         for (int i = 0; i < InfEngineConfig::NUM_LAYERS; i++) {
             // apply rmsnorm from data buffer to aux buffer
             rmsnorm(seq_len, data_buffer, model_weights.layers[i].input_layernorm, aux_buffer);
-            // apply attn 
+            // apply attn
             attn(handle, model_weights.rope.cos, model_weights.rope.sin, seq_len, aux_buffer,
                 model_weights.layers[i].transformer.w_q,
                 model_weights.layers[i].transformer.w_k,
                 model_weights.layers[i].transformer.w_v,
                 model_weights.layers[i].transformer.w_o,
-                attn_buffer);
+                attn_buffer, workspace);
 
             // add into x, copy x back to aux
             residual_add(seq_len, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
@@ -87,7 +92,7 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
             ffn(handle, seq_len, aux_buffer, attn_buffer,
                 model_weights.layers[i].ffn_block.w_up,
                 model_weights.layers[i].ffn_block.w_down,
-                model_weights.layers[i].ffn_block.w_gate);
+                model_weights.layers[i].ffn_block.w_gate, workspace);
             // add back to x
             residual_add(seq_len, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
         }
@@ -116,6 +121,7 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
     cudaEventDestroy(endEvent);
     cudaEventDestroy(startEvent);
     
+    cudaFree(workspace);
     cudaFree(data_buffer);
     cudaFree(aux_buffer);
     cudaFree(attn_buffer);

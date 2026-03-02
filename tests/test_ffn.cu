@@ -30,8 +30,10 @@ TEST(FFN, MatchesPyTorch) {
     cudaMemcpy(d_wdown, wdown.data(), InfEngineConfig::HALF_SIZE * wdown.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(d_wgate, wgate.data(), InfEngineConfig::HALF_SIZE * wgate.size(), cudaMemcpyHostToDevice);
 
-    // needs to be launched with 
-    ffn(handle, seq_len, d_input, d_output, d_wup, d_wdown, d_wgate);
+    void* workspace;
+    cudaMalloc(&workspace, ffn_workspace_size(seq_len));
+
+    ffn(handle, seq_len, d_input, d_output, d_wup, d_wdown, d_wgate, workspace);
     cudaMemcpy(actual.data(), d_output, expected.size() * InfEngineConfig::HALF_SIZE, cudaMemcpyDeviceToHost);
 
     CompareResult result = compare_tensors(actual.data(), expected.data(), expected.size(), 1e-3);
@@ -39,6 +41,7 @@ TEST(FFN, MatchesPyTorch) {
     EXPECT_LT(result.max_abs_err, 8e-3);
     EXPECT_GT(result.pct_within_tol, 99.0);
 
+    cudaFree(workspace);
     cudaFree(d_input); cudaFree(d_output); cudaFree(d_wup); cudaFree(d_wdown); cudaFree(d_wgate);
     cublasDestroy(handle);
 }

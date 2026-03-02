@@ -37,7 +37,7 @@ void multiply_kqv_proj(cublasHandle_t handle, const half* d_W, const half* d_inp
         CUBLAS_GEMM_DEFAULT);
 }
 
-void multiply_QKt(cublasHandle_t handle, const half* Q, const half* K, half* d_QKt_buffer, const int seq_len) {
+void multiply_QKt(cublasHandle_t handle, const half* Q, const half* K, half* d_QKt_buffer, const int seq_len, half** d_q_ptrs, half** d_k_ptrs, half** d_o_ptrs) {
     // another matmul... we want to find X = Q @ K^t -> X^t = K @ Q^t -> we give cuBLAS K, tell it to transpose, give it Q, tell it not to transpose
     // we want to do n_q_heads matmuls, but those matmuls will share K matrices, we will use a ptr array to write this
     // as we do matmuls, we keep advancing q. we advance k once every (num_q/num_k). we keep advancing out.
@@ -62,15 +62,9 @@ void multiply_QKt(cublasHandle_t handle, const half* Q, const half* K, half* d_Q
 
     float alpha = 1.0f; float beta = 0.0f;
 
-    // we actually have to put the q/k/output ptr arrays on device
-    half** d_q_ptrs; half** d_k_ptrs; half** d_o_ptrs;
-    cudaMalloc(&d_q_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*));
-    cudaMalloc(&d_k_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*));
-    cudaMalloc(&d_o_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*));
     cudaMemcpy(d_q_ptrs, q_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
     cudaMemcpy(d_k_ptrs, k_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
     cudaMemcpy(d_o_ptrs, o_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
-
 
     // m: rows in K = seq_len, k = cols in K = rows in Q^t = head_dim, n = cols in Q^t = seq_len
     auto result = cublasGemmBatchedEx(handle,
@@ -94,14 +88,13 @@ void multiply_QKt(cublasHandle_t handle, const half* Q, const half* K, half* d_Q
         CUDA_R_32F, // accum in fp32
         CUBLAS_GEMM_DEFAULT);
 
-    cudaFree(d_q_ptrs); cudaFree(d_k_ptrs); cudaFree(d_o_ptrs);
     if (result != CUBLAS_STATUS_SUCCESS) {
         printf("cublasGemmBatchedEx failed in QK^T computation with error code %d\n", result);
     }
 
 }
 
-void multiply_attn_weights_V(cublasHandle_t handle, const int seq_len, const half* attn_weights, const half* V, half* output) {
+void multiply_attn_weights_V(cublasHandle_t handle, const int seq_len, const half* attn_weights, const half* V, half* output, half** d_v_ptrs, half** d_a_ptrs, half** d_o_ptrs) {
     // want to compute attn_weights @ V, call it X = A @ V, however V is broadcasted
     // attn_weights is [n_q_heads, seq_len, seq_len], v is [n_kv_heads, seq_len, head_dim]
     // output should be [num_q_heads, seq_len, head_dim]
@@ -132,11 +125,6 @@ void multiply_attn_weights_V(cublasHandle_t handle, const int seq_len, const hal
 
     float alpha = 1.0f; float beta = 0.0f;
 
-    // we actually have to put the q/k/output ptr arrays on device
-    half** d_v_ptrs; half** d_a_ptrs; half** d_o_ptrs;
-    cudaMalloc(&d_v_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*));
-    cudaMalloc(&d_a_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*));
-    cudaMalloc(&d_o_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*));
     cudaMemcpy(d_v_ptrs, v_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
     cudaMemcpy(d_a_ptrs, a_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
     cudaMemcpy(d_o_ptrs, o_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
@@ -162,8 +150,6 @@ void multiply_attn_weights_V(cublasHandle_t handle, const int seq_len, const hal
         InfEngineConfig::NUM_Q_HEADS,
         CUDA_R_32F, // accum in fp32
         CUBLAS_GEMM_DEFAULT);
-
-    cudaFree(d_v_ptrs); cudaFree(d_a_ptrs); cudaFree(d_o_ptrs);
 
     if (result != CUBLAS_STATUS_SUCCESS) {
         printf("cublasGemmBatchedEx failed in attn_weights @ V computation with error code %d\n", result);
@@ -200,14 +186,47 @@ void multiply_preproj_Wo(cublasHandle_t handle, const int seq_len, const half* d
     }
 }
 
-// TODO: prealloc workspace reusable across attn calls
-void attn(cublasHandle_t handle, const float* d_rope_cos, const float* d_rope_sin, const int seq_len, half* d_input, half* d_qproj, half* d_kproj, half* d_vproj, half* d_oproj, half* d_output) {
-    // input: [seq_len, hidden_dim]
-    // compute K Q V, alloc new buffers for them
-    half* K; half* Q; half* V;
-    cudaMalloc(&K, seq_len * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half));
-    cudaMalloc(&Q, seq_len * InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half));
-    cudaMalloc(&V, seq_len * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half));
+size_t attn_workspace_size(int max_seq_len) {
+    size_t S = max_seq_len;
+    size_t q_bytes = S * InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
+    size_t k_bytes = S * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
+    size_t v_bytes = k_bytes;
+    size_t attn_w_bytes = InfEngineConfig::NUM_Q_HEADS * S * S * sizeof(half);
+    size_t pre_proj_bytes = q_bytes;
+    size_t ptr_bytes = 6 * InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    return q_bytes + k_bytes + v_bytes + attn_w_bytes + pre_proj_bytes + ptr_bytes;
+}
+
+void attn(cublasHandle_t handle, const float* d_rope_cos, const float* d_rope_sin, const int seq_len, half* d_input, half* d_qproj, half* d_kproj, half* d_vproj, half* d_oproj, half* d_output, void* workspace) {
+    // unpack workspace
+    char* ws = (char*)workspace;
+
+    half* Q = (half*)ws;
+    ws += seq_len * InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
+
+    half* K = (half*)ws;
+    ws += seq_len * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
+
+    half* V = (half*)ws;
+    ws += seq_len * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
+
+    half* d_attn_weights = (half*)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * seq_len * seq_len * sizeof(half);
+
+    half* d_pre_proj = (half*)ws;
+    ws += seq_len * InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
+
+    half** qkt_q_ptrs = (half**)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    half** qkt_k_ptrs = (half**)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    half** qkt_o_ptrs = (half**)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    half** av_v_ptrs = (half**)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    half** av_a_ptrs = (half**)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    half** av_o_ptrs = (half**)ws;
 
     // input: [seq_len, hidden_dim]
     // W_k: [n_k_heads * head_dim, hidden_dim]
@@ -224,11 +243,8 @@ void attn(cublasHandle_t handle, const float* d_rope_cos, const float* d_rope_si
     apply_rope(InfEngineConfig::NUM_KV_HEADS, seq_len, d_rope_cos, d_rope_sin, K, K);
     apply_rope(InfEngineConfig::NUM_Q_HEADS, seq_len, d_rope_cos, d_rope_sin, Q, Q);
 
-    // broadcast and transpose done by cublas to get QK^t scores in new buffer [n_heads, seq, seq]
-    half* d_attn_weights;
-    cudaMalloc(&d_attn_weights, InfEngineConfig::NUM_Q_HEADS * seq_len * seq_len * sizeof(half));
     // [n_q_heads, seq_len, head_dim], [(broadcast)n_kv_heads, seq_len, head_dim] -> [n_q_heads, seq_len, seq_len]
-    multiply_QKt(handle, Q, K, d_attn_weights, seq_len);
+    multiply_QKt(handle, Q, K, d_attn_weights, seq_len, qkt_q_ptrs, qkt_k_ptrs, qkt_o_ptrs);
 
     // apply in place scale+causal+softmax to get attn_weights in same [n_heads, seq, seq] buffer
     scale_causal_softmax(seq_len, d_attn_weights, d_attn_weights);
@@ -236,20 +252,12 @@ void attn(cublasHandle_t handle, const float* d_rope_cos, const float* d_rope_si
     // do batched (across n_heads) attn_weights @ V into the reused Q buffer
     half* d_attended = Q;
     // [n_q_heads, seq_len, seq_len] @ [n_kv_heads (broadcast), seq_len, head_dim] -> [n_q_heads, seq_len, head_dim]
-    multiply_attn_weights_V(handle, seq_len, d_attn_weights, V, d_attended);
+    multiply_attn_weights_V(handle, seq_len, d_attn_weights, V, d_attended, av_v_ptrs, av_a_ptrs, av_o_ptrs);
 
-    half* d_pre_proj;
-    cudaMalloc(&d_pre_proj, seq_len * InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half));
     // apply same attn_permute to get to a new buffer [seq_len, num_heads, head_dim]
     attn_permute(seq_len, d_attended, d_pre_proj);
 
     // buffer @ W_o -> [seq_len, num_heads * head_dim=hidden_dim] @ [hidden_dim, hidden_dim] into output buffer [seq_len, hidden_dim]
     // simple matmul
     multiply_preproj_Wo(handle, seq_len, d_pre_proj, d_oproj, d_output);
-
-    cudaFree(K);
-    cudaFree(Q);
-    cudaFree(V);
-    cudaFree(d_attn_weights);
-    cudaFree(d_pre_proj);
 }
