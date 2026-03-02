@@ -201,7 +201,7 @@ void multiply_preproj_Wo(cublasHandle_t handle, const int seq_len, const half* d
 }
 
 // TODO: prealloc workspace reusable across attn calls
-void attn(const float* d_rope_cos, const float* d_rope_sin, const int seq_len, half* d_input, half* d_qproj, half* d_kproj, half* d_vproj, half* d_oproj, half* d_output) {
+void attn(cublasHandle_t handle, const float* d_rope_cos, const float* d_rope_sin, const int seq_len, half* d_input, half* d_qproj, half* d_kproj, half* d_vproj, half* d_oproj, half* d_output) {
     // input: [seq_len, hidden_dim]
     // compute K Q V, alloc new buffers for them
     half* K; half* Q; half* V;
@@ -215,8 +215,6 @@ void attn(const float* d_rope_cos, const float* d_rope_sin, const int seq_len, h
     // using cuBLAS (colmajor), we can find K^t = W_k @ input^t
     // we can read K^t to get K going from col to row. cuBLAS will read W_k and input as W_k^t and input^t, so we need a transpose flag on W_k
     // for cuBLAS, m = rows in W_k = 128 (head_dim), k = cols in W_k = rows in x = 4096 (hidden_dim), n = cols in x^t (seq_len)
-    cublasHandle_t handle;
-    cublasCreate(&handle);
     multiply_kqv_proj(handle, d_qproj, d_input, Q, seq_len, InfEngineConfig::NUM_Q_HEADS);
     multiply_kqv_proj(handle, d_kproj, d_input, K, seq_len, InfEngineConfig::NUM_KV_HEADS);
     multiply_kqv_proj(handle, d_vproj, d_input, V, seq_len, InfEngineConfig::NUM_KV_HEADS);
@@ -254,5 +252,4 @@ void attn(const float* d_rope_cos, const float* d_rope_sin, const int seq_len, h
     cudaFree(V);
     cudaFree(d_attn_weights);
     cudaFree(d_pre_proj);
-    cublasDestroy(handle);
 }

@@ -17,7 +17,8 @@ TEST(FFN, MatchesPyTorch) {
     int seq_len = input.size() / InfEngineConfig::HIDDEN_SIZE;
 
     __half* d_input; __half* d_wgate; __half* d_wup; __half* d_wdown; __half* d_output;
-
+    cublasHandle_t handle;
+    cublasCreate(&handle);
     cudaMalloc(&d_input, InfEngineConfig::HALF_SIZE * input.size());
     cudaMalloc(&d_output, InfEngineConfig::HALF_SIZE * expected.size());
     cudaMalloc(&d_wup, InfEngineConfig::HALF_SIZE * wup.size());
@@ -30,7 +31,7 @@ TEST(FFN, MatchesPyTorch) {
     cudaMemcpy(d_wgate, wgate.data(), InfEngineConfig::HALF_SIZE * wgate.size(), cudaMemcpyHostToDevice);
 
     // needs to be launched with 
-    ffn(seq_len, d_input, d_output, d_wup, d_wdown, d_wgate);
+    ffn(handle, seq_len, d_input, d_output, d_wup, d_wdown, d_wgate);
     cudaMemcpy(actual.data(), d_output, expected.size() * InfEngineConfig::HALF_SIZE, cudaMemcpyDeviceToHost);
 
     CompareResult result = compare_tensors(actual.data(), expected.data(), expected.size(), 1e-3);
@@ -39,4 +40,5 @@ TEST(FFN, MatchesPyTorch) {
     EXPECT_GT(result.pct_within_tol, 99.0);
 
     cudaFree(d_input); cudaFree(d_output); cudaFree(d_wup); cudaFree(d_wdown); cudaFree(d_wgate);
+    cublasDestroy(handle);
 }

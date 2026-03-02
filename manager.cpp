@@ -1,5 +1,7 @@
 #include <driver_types.h>
+#include <cuda_profiler_api.h>
 #include <cuda_runtime_api.h>
+#include <cublas_v2.h>
 #include <tokenizers_cpp.h>
 #include "manager.h"
 #include "kernels/emblookup.cuh"
@@ -54,7 +56,11 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
     cudaEventCreate(&endEvent);
 
     cudaEventRecord(startEvent, 0);
-    for (int num_tokens = 0; num_tokens < 1000; num_tokens++) {
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    cudaProfilerStart();
+
+    for (int num_tokens = 0; num_tokens < 100; num_tokens++) {
         int seq_len = context.tokens.size();
         cudaMemcpy(tokenid_buff, context.tokens.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice);
         emblookup(context.tokens.size(), tokenid_buff, model_weights.emb_lookup, data_buffer);
@@ -64,7 +70,7 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
             // apply rmsnorm from data buffer to aux buffer
             rmsnorm(seq_len, data_buffer, model_weights.layers[i].input_layernorm, aux_buffer);
             // apply attn 
-            attn(model_weights.rope.cos, model_weights.rope.sin, seq_len, aux_buffer,
+            attn(handle, model_weights.rope.cos, model_weights.rope.sin, seq_len, aux_buffer,
                 model_weights.layers[i].transformer.w_q,
                 model_weights.layers[i].transformer.w_k,
                 model_weights.layers[i].transformer.w_v,
@@ -77,7 +83,7 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
             // apply rmsnorm to aux buffer inplace
             rmsnorm(seq_len, data_buffer, model_weights.layers[i].post_attention_layernorm, aux_buffer);
             // apply ffn
-            ffn(seq_len, aux_buffer, attn_buffer,
+            ffn(handle, seq_len, aux_buffer, attn_buffer,
                 model_weights.layers[i].ffn_block.w_up,
                 model_weights.layers[i].ffn_block.w_down,
                 model_weights.layers[i].ffn_block.w_gate);
@@ -87,7 +93,7 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
 
         // apply final norm
         rmsnorm(seq_len, data_buffer, model_weights.final_norm, data_buffer);
-        lm_head(seq_len, data_buffer, model_weights.lm_head, output_distr);
+        lm_head(handle, seq_len, data_buffer, model_weights.lm_head, output_distr);
         sample_token_amax(output_distr, output_token);
 
         int final_token;
@@ -95,6 +101,7 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
         context.tokens.push_back(final_token);
         printf("step %d: token_id = %d\n", num_tokens, final_token);
     }
+    cudaProfilerStop();
     cudaEventRecord(endEvent, 0);
     cudaEventSynchronize(endEvent);
 
@@ -111,7 +118,7 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
     cudaFree(output_distr);
     cudaFree(output_token);
     cudaFree(tokenid_buff);
-
+    cublasDestroy(handle);
     return detokenize(context.tokens);
 }
 

@@ -1,4 +1,5 @@
 #include <driver_types.h>
+#include <cublas_v2.h>
 #include <gtest/gtest.h>
 #include "test_utils.h"
 #include "../config.h"
@@ -26,7 +27,8 @@ TEST(Attention, MatchesPyTorch) {
     const int kv_proj_size_bytes = InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM * InfEngineConfig::HIDDEN_SIZE * InfEngineConfig::HALF_SIZE;
     const int q_proj_size_bytes = InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * InfEngineConfig::HIDDEN_SIZE * InfEngineConfig::HALF_SIZE;
     const int o_proj_size_bytes = InfEngineConfig::HIDDEN_SIZE * InfEngineConfig::HIDDEN_SIZE * InfEngineConfig::HALF_SIZE;
-
+    cublasHandle_t handle;
+    cublasCreate(&handle);
     __half* d_input; __half* d_Wk; __half* d_Wq; __half* d_Wv; __half* d_Wo; __half* d_actual;
     cudaMalloc(&d_input, input_size_bytes);
     cudaMemcpy(d_input, input.data(), input_size_bytes, cudaMemcpyHostToDevice);
@@ -51,7 +53,7 @@ TEST(Attention, MatchesPyTorch) {
     init_rope_buffer(&d_rope_cos, &d_rope_sin);
 
     // needs to be launched with 
-    attn(d_rope_cos, d_rope_sin, seq_len, d_input, d_Wq, d_Wk, d_Wv, d_Wo, d_actual);
+    attn(handle, d_rope_cos, d_rope_sin, seq_len, d_input, d_Wq, d_Wk, d_Wv, d_Wo, d_actual);
     cudaMemcpy(actual.data(), d_actual, output_size_bytes, cudaMemcpyDeviceToHost);
 
     CompareResult result = compare_tensors(actual.data(), expected.data(), expected.size(), 1e-3);
@@ -66,4 +68,5 @@ TEST(Attention, MatchesPyTorch) {
     cudaFree(d_Wo);
     cudaFree(d_actual);
     cleanup_rope_buffer(d_rope_cos, d_rope_sin);
+    cublasDestroy(handle);
 }

@@ -32,9 +32,7 @@ void multiply_by_weight(cublasHandle_t handle, const int m, const int k, const i
         CUBLAS_GEMM_DEFAULT);
 }
 
-void ffn(const int seq_len, half* d_in, half* d_out, half* d_wup, half* d_wdown, half* d_wgate) {
-    cublasHandle_t handle;
-    cublasCreate(&handle);
+void ffn(cublasHandle_t handle, const int seq_len, half* d_in, half* d_out, half* d_wup, half* d_wdown, half* d_wgate) {
     // x = input [seq_len, hidden_dim]
     // Wg is [ffn_dim, hidden_dim]
     // Wup is [ffn_dim, hidden_dim]
@@ -63,6 +61,5 @@ void ffn(const int seq_len, half* d_in, half* d_out, half* d_wup, half* d_wdown,
     multiply_by_weight(handle, seq_len, InfEngineConfig::FFN_DIM, InfEngineConfig::HIDDEN_SIZE, d_G, d_wdown, d_out);
 
     // output [seq_len, hidden_dim]
-    cublasDestroy(handle);
     cudaFree(d_G); cudaFree(d_U);
 }
