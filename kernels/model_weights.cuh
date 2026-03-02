@@ -1,3 +1,4 @@
+#pragma once
 #include <vector>
 #include <string>
 #include <cuda_fp16.h>
@@ -5,6 +6,7 @@
 
 struct TransformerBlockWeights { half* w_k; half* w_q; half* w_v; half* w_o; };
 struct FFNBlockWeights { half* w_up; half* w_gate; half* w_down; };
+struct RoPEWeights { float* cos; float* sin; };
 
 struct Layer {
     half* input_layernorm;
@@ -24,6 +26,8 @@ struct ModelWeights {
     // final lmhead
     half* final_norm;
     half* lm_head;
+
+    RoPEWeights rope;
 
     static ModelWeights from_safetensors(std::vector<std::string> safetensors_paths);
     void free();

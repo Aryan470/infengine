@@ -1,10 +1,12 @@
 #include <cassert>
+#include <cuda_runtime_api.h>
 #include <iostream>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include "model_weights.cuh"
+#include "rope.cuh"
 
 #include <sys/mman.h>
 #include <fcntl.h>
@@ -143,6 +145,8 @@ ModelWeights ModelWeights::from_safetensors(std::vector<std::string> safetensors
     for (auto& filepath : safetensors_paths) {
         populate_modelweights(m, filepath);
     }
+    // precompute rope buffer
+    init_rope_buffer(&m.rope.cos, &m.rope.sin);
 
     // ensure that we have populated each pointer
     if (!check_all_present(m)) { throw std::runtime_error("ModelWeights: not all required pointers are present after loading from safetensors."); }
@@ -164,4 +168,6 @@ void ModelWeights::free() {
     }
     cudaFree(final_norm);
     cudaFree(lm_head);
+    cudaFree(rope.cos);
+    cudaFree(rope.sin);
 }
