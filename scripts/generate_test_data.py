@@ -167,6 +167,18 @@ def save_sampling_amax_data():
     amax = int(torch.argmax(logits).item())
     np.array([amax], dtype=np.int32).tofile("test_data/sampling_amax_output.bin")
 
+def save_residual_add():
+    torch.manual_seed(42)
+    seq_len = 128
+    x = torch.randn(seq_len, HIDDEN_DIM, dtype=torch.float16)
+    delta = torch.randn(seq_len, HIDDEN_DIM, dtype=torch.float16)
+    result = x + delta
+
+    x.detach().cpu().numpy().tofile("test_data/residual_add_input.bin")
+    delta.detach().cpu().numpy().tofile("test_data/residual_add_delta.bin")
+    result.detach().cpu().numpy().tofile("test_data/residual_add_output.bin")
+
+
 
 if __name__ == "__main__":
     model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B", torch_dtype=torch.float16)
@@ -179,3 +191,4 @@ if __name__ == "__main__":
     save_ffn_data(model)
     save_emblookup_data(model)
     save_sampling_amax_data()
+    save_residual_add()
