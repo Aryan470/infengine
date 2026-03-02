@@ -1,5 +1,6 @@
 import math
 import torch
+import numpy as np
 from transformers import LlamaForCausalLM
 from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
@@ -159,6 +160,13 @@ def save_emblookup_data(model):
     output = embed_weight[token_ids]
     output.detach().contiguous().numpy().tofile("test_data/emblookup_output.bin")
 
+def save_sampling_amax_data():
+    torch.manual_seed(42)
+    logits = torch.randn(VOCAB_SIZE, dtype=torch.float16)
+    logits.detach().cpu().numpy().tofile("test_data/sampling_amax_input.bin")
+    amax = int(torch.argmax(logits).item())
+    np.array([amax], dtype=np.int32).tofile("test_data/sampling_amax_output.bin")
+
 
 if __name__ == "__main__":
     model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B", torch_dtype=torch.float16)
@@ -170,3 +178,4 @@ if __name__ == "__main__":
     save_swiglu_data()
     save_ffn_data(model)
     save_emblookup_data(model)
+    save_sampling_amax_data()
