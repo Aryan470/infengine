@@ -8,6 +8,7 @@ N_KV_HEADS = 8
 HIDDEN_DIM = 4096
 HEAD_DIM = 128
 FFN_DIM = 14336
+VOCAB_SIZE = 128256
 
 def save_rmsnorm_data():
     torch.manual_seed(42)
@@ -145,6 +146,19 @@ def save_ffn_data(model):
     x.to(torch.float16).detach().cpu().numpy().tofile("test_data/ffn_in.bin")
     out.to(torch.float16).detach().cpu().numpy().tofile("test_data/ffn_out.bin")
 
+def save_emblookup_data(model):
+    torch.manual_seed(42)
+
+    # generate some token_ids
+    seq_len = 128
+    token_ids = torch.randint(0, VOCAB_SIZE, (seq_len,), dtype=torch.int32)
+    token_ids.detach().contiguous().numpy().tofile("test_data/emblookup_tokens.bin")
+    # [vocab_size, 4096] in fp16
+    embed_weight = model.model.embed_tokens.weight
+    embed_weight.detach().contiguous().numpy().tofile("test_data/emblookup_weights.bin")
+    output = embed_weight[token_ids]
+    output.detach().contiguous().numpy().tofile("test_data/emblookup_output.bin")
+
 
 if __name__ == "__main__":
     model = LlamaForCausalLM.from_pretrained("meta-llama/Llama-3.1-8B", torch_dtype=torch.float16)
@@ -155,3 +169,4 @@ if __name__ == "__main__":
     save_e2e_attn_data(model)
     save_swiglu_data()
     save_ffn_data(model)
+    save_emblookup_data(model)

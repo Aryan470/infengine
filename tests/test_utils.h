@@ -5,6 +5,7 @@
 
 std::vector<__half> load_tensor(const std::string& path);
 std::vector<float> load_float_tensor(const std::string& path);
+std::vector<int> load_int_tensor(const std::string& path);
 
 struct CompareResult {
     float max_abs_err;

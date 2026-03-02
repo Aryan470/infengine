@@ -15,6 +15,20 @@ std::vector<__half> load_tensor(const std::string& path) {
     return data;
 }
 
+
+std::vector<int> load_int_tensor(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) {
+        throw std::runtime_error("Could not open file: " + path);
+    }
+    f.seekg(0, std::ios::end);
+    size_t size = f.tellg() / sizeof(int);
+    f.seekg(0);
+    std::vector<int> data(size);
+    f.read(reinterpret_cast<char*>(data.data()), size * sizeof(int));
+    return data;
+}
+
 std::vector<float> load_float_tensor(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     f.seekg(0, std::ios::end);
@@ -32,7 +46,7 @@ CompareResult compare_tensors(const __half* actual, const __half* expected, size
         float err = std::abs(__half2float(actual[i]) - __half2float(expected[i]));
         r.max_abs_err = std::max(r.max_abs_err, err);
         r.mean_abs_err += err;
-        if (err < atol) within++;
+        if (err <= atol) within++;
     }
     r.mean_abs_err /= n;
     r.pct_within_tol = 100.f * within / n;
