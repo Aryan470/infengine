@@ -38,34 +38,31 @@ void multiply_kqv_proj(cublasHandle_t handle, const half* d_W, const half* d_inp
         CUBLAS_GEMM_DEFAULT);
 }
 
-void multiply_QKt(cublasHandle_t handle, const half* Q, const half* K, half* d_QKt_buffer, const int seq_len, half** d_q_ptrs, half** d_k_ptrs, half** d_o_ptrs) {
-    // another matmul... we want to find X = Q @ K^t -> X^t = K @ Q^t -> we give cuBLAS K, tell it to transpose, give it Q, tell it not to transpose
-    // we want to do n_q_heads matmuls, but those matmuls will share K matrices, we will use a ptr array to write this
-    // as we do matmuls, we keep advancing q. we advance k once every (num_q/num_k). we keep advancing out.
-    const half* q_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    const half* k_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    half* o_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    q_ptrs[0] = Q;
-    k_ptrs[0] = K;
-    o_ptrs[0] = d_QKt_buffer;
+__global__ void compute_qkt_mul_pointers(half** d_q_ptrs, half** d_k_ptrs, half** d_o_ptrs, half* Q, half* K, half* d_QKt_buffer, const int seq_len) {
+    d_q_ptrs[0] = Q;
+    d_k_ptrs[0] = K;
+    d_o_ptrs[0] = d_QKt_buffer;
 
     for (int i = 1; i < InfEngineConfig::NUM_Q_HEADS; i++) {
         // move up by size of 1 Q matrix = seq_len * head_dim
-        q_ptrs[i] = q_ptrs[i - 1] + (seq_len * InfEngineConfig::HEAD_DIM);
+        d_q_ptrs[i] = d_q_ptrs[i - 1] + (seq_len * InfEngineConfig::HEAD_DIM);
         // if i % (num_q/num_k) = 0, then move up by 1 k matrix (seq_len * head_dim)
-        k_ptrs[i] = k_ptrs[i - 1];
+        d_k_ptrs[i] = d_k_ptrs[i - 1];
         if (i % (InfEngineConfig::NUM_Q_HEADS / InfEngineConfig::NUM_KV_HEADS) == 0) {
-            k_ptrs[i] += InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
+            d_k_ptrs[i] += InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
         }
         // move up by size of 1 output matrix = seq_len * seq_len
-        o_ptrs[i] = o_ptrs[i - 1] + (seq_len * seq_len);
+        d_o_ptrs[i] = d_o_ptrs[i - 1] + (seq_len * seq_len);
     }
+}
+
+void multiply_QKt(cublasHandle_t handle, half* Q, half* K, half* d_QKt_buffer, const int seq_len, half** d_q_ptrs, half** d_k_ptrs, half** d_o_ptrs) {
+    // another matmul... we want to find X = Q @ K^t -> X^t = K @ Q^t -> we give cuBLAS K, tell it to transpose, give it Q, tell it not to transpose
+    // we want to do n_q_heads matmuls, but those matmuls will share K matrices, we will use a ptr array to write this
+    // as we do matmuls, we keep advancing q. we advance k once every (num_q/num_k). we keep advancing out.
 
     float alpha = 1.0f; float beta = 0.0f;
-
-    cudaMemcpy(d_q_ptrs, q_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_k_ptrs, k_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_o_ptrs, o_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
+    compute_qkt_mul_pointers<<<1, 1>>>(d_q_ptrs, d_k_ptrs, d_o_ptrs, Q, K, d_QKt_buffer, seq_len);
 
     // m: rows in K = seq_len, k = cols in K = rows in Q^t = head_dim, n = cols in Q^t = seq_len
     auto result = cublasGemmBatchedEx(handle,
@@ -94,34 +91,32 @@ void multiply_QKt(cublasHandle_t handle, const half* Q, const half* K, half* d_Q
     }
 }
 
-void multiply_QKt_decode(cublasHandle_t handle, const half* Q, const half* K, half* d_QKt_buffer, const int seq_len, half** d_q_ptrs, half** d_k_ptrs, half** d_o_ptrs) {
-    // we want to find X = q @ K^t -> X^t = K @ q^t -> we give cuBLAS K, tell it to transpose, give it q, tell it not to transpose
-    // we want to do n_q_heads matmuls, but those matmuls will share K matrices, we will use a ptr array to write this
-    // as we do matmuls, we keep advancing q. we advance k once every (num_q/num_k). we keep advancing out.
-    const half* q_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    const half* k_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    half* o_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    q_ptrs[0] = Q;
-    k_ptrs[0] = K;
-    o_ptrs[0] = d_QKt_buffer;
+__global__ void compute_qkt_mul_pointers_decode(half** d_q_ptrs, half** d_k_ptrs, half** d_o_ptrs, half* Q, half* K, half* d_QKt_buffer, const int seq_len) {
+    d_q_ptrs[0] = Q;
+    d_k_ptrs[0] = K;
+    d_o_ptrs[0] = d_QKt_buffer;
 
     for (int i = 1; i < InfEngineConfig::NUM_Q_HEADS; i++) {
         // move up by size of 1 q matrix = 1 * head_dim
-        q_ptrs[i] = q_ptrs[i - 1] + (1 * InfEngineConfig::HEAD_DIM);
+        d_q_ptrs[i] = d_q_ptrs[i - 1] + (1 * InfEngineConfig::HEAD_DIM);
         // if i % (num_q/num_k) = 0, then move up by 1 k matrix (seq_len * head_dim)
-        k_ptrs[i] = k_ptrs[i - 1];
+        d_k_ptrs[i] = d_k_ptrs[i - 1];
         if (i % (InfEngineConfig::NUM_Q_HEADS / InfEngineConfig::NUM_KV_HEADS) == 0) {
-            k_ptrs[i] += InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
+            d_k_ptrs[i] += InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
         }
         // move up by size of 1 output matrix = 1 * seq_len
-        o_ptrs[i] = o_ptrs[i - 1] + (1 * seq_len);
+        d_o_ptrs[i] = d_o_ptrs[i - 1] + (1 * seq_len);
     }
+}
+
+void multiply_QKt_decode(cublasHandle_t handle, half* Q, half* K, half* d_QKt_buffer, const int seq_len, half** d_q_ptrs, half** d_k_ptrs, half** d_o_ptrs) {
+    // we want to find X = q @ K^t -> X^t = K @ q^t -> we give cuBLAS K, tell it to transpose, give it q, tell it not to transpose
+    // we want to do n_q_heads matmuls, but those matmuls will share K matrices, we will use a ptr array to write this
+    // as we do matmuls, we keep advancing q. we advance k once every (num_q/num_k). we keep advancing out.
+    compute_qkt_mul_pointers_decode<<<1, 1>>>(d_q_ptrs, d_k_ptrs, d_o_ptrs, Q, K, d_QKt_buffer, seq_len);
 
     float alpha = 1.0f; float beta = 0.0f;
 
-    cudaMemcpy(d_q_ptrs, q_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_k_ptrs, k_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_o_ptrs, o_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
 
     // m: rows in K = seq_len, k = cols in K = rows in Q^t = head_dim, n = cols in Q^t = 1
     auto result = cublasGemmBatchedEx(handle,
@@ -150,7 +145,26 @@ void multiply_QKt_decode(cublasHandle_t handle, const half* Q, const half* K, ha
     }
 }
 
-void multiply_attn_weights_V(cublasHandle_t handle, const int seq_len, const half* attn_weights, const half* V, half* output, half** d_v_ptrs, half** d_a_ptrs, half** d_o_ptrs) {
+__global__ void compute_av_mul_pointers(half** d_v_ptrs, half** d_a_ptrs, half** d_o_ptrs, half* V, half* attn_weights, half* output, const int seq_len) {
+    d_v_ptrs[0] = V;
+    d_a_ptrs[0] = attn_weights;
+    d_o_ptrs[0] = output;
+
+    for (int i = 1; i < InfEngineConfig::NUM_Q_HEADS; i++) {
+        // if i % (num_q/num_k) = 0, then move up by 1 V matrix (seq_len * head_dim)
+        d_v_ptrs[i] = d_v_ptrs[i - 1];
+        if (i % (InfEngineConfig::NUM_Q_HEADS / InfEngineConfig::NUM_KV_HEADS) == 0) {
+            d_v_ptrs[i] += InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
+        }
+
+        // move up by size of 1 A matrix = seq_len * seq_len
+        d_a_ptrs[i] = d_a_ptrs[i - 1] + (seq_len * seq_len);
+        // move up by size of 1 output matrix = seq_len * head_dim
+        d_o_ptrs[i] = d_o_ptrs[i - 1] + (seq_len * InfEngineConfig::HEAD_DIM);
+    }
+}
+
+void multiply_attn_weights_V(cublasHandle_t handle, const int seq_len, half* attn_weights, half* V, half* output, half** d_v_ptrs, half** d_a_ptrs, half** d_o_ptrs) {
     // want to compute attn_weights @ V, call it X = A @ V, however V is broadcasted
     // attn_weights is [n_q_heads, seq_len, seq_len], v is [n_kv_heads, seq_len, head_dim]
     // output should be [num_q_heads, seq_len, head_dim]
@@ -159,32 +173,9 @@ void multiply_attn_weights_V(cublasHandle_t handle, const int seq_len, const hal
     // we will compute X^t = V^t @ A^t, we can feed in V, A and they will be read as transposed
     // dim V^t = [head_dim, seq_len], A^t = [seq_len, seq_len], X^t = [head_dim, seq_len]
 
-    const half* v_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    const half* a_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    half* o_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    v_ptrs[0] = V;
-    a_ptrs[0] = attn_weights;
-    o_ptrs[0] = output;
-
-    for (int i = 1; i < InfEngineConfig::NUM_Q_HEADS; i++) {
-        // if i % (num_q/num_k) = 0, then move up by 1 V matrix (seq_len * head_dim)
-        v_ptrs[i] = v_ptrs[i - 1];
-        if (i % (InfEngineConfig::NUM_Q_HEADS / InfEngineConfig::NUM_KV_HEADS) == 0) {
-            v_ptrs[i] += InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
-        }
-
-        // move up by size of 1 A matrix = seq_len * seq_len
-        a_ptrs[i] = a_ptrs[i - 1] + (seq_len * seq_len);
-        // move up by size of 1 output matrix = seq_len * head_dim
-        o_ptrs[i] = o_ptrs[i - 1] + (seq_len * InfEngineConfig::HEAD_DIM);
-    }
+    compute_av_mul_pointers<<<1, 1>>>(d_v_ptrs, d_a_ptrs, d_o_ptrs, V, attn_weights, output, seq_len);
 
     float alpha = 1.0f; float beta = 0.0f;
-
-    cudaMemcpy(d_v_ptrs, v_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_a_ptrs, a_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_o_ptrs, o_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
-
     // m: rows in V^t = head_dim, k = cols in V^t = rows in A^t = seq_len, n = cols in A^t = seq_len
     auto result = cublasGemmBatchedEx(handle,
         CUBLAS_OP_N, // don't transpose
@@ -212,7 +203,26 @@ void multiply_attn_weights_V(cublasHandle_t handle, const int seq_len, const hal
     }
 }
 
-void multiply_attn_weights_V_decode(cublasHandle_t handle, const int seq_len, const half* attn_weights, const half* V, half* output, half** d_v_ptrs, half** d_a_ptrs, half** d_o_ptrs) {
+__global__ void compute_av_mul_pointers_decode(half** d_v_ptrs, half** d_a_ptrs, half** d_o_ptrs, half* V, half* attn_weights, half* output, const int seq_len) {
+    d_v_ptrs[0] = V;
+    d_a_ptrs[0] = attn_weights;
+    d_o_ptrs[0] = output;
+
+    for (int i = 1; i < InfEngineConfig::NUM_Q_HEADS; i++) {
+        // if i % (num_q/num_k) = 0, then move up by 1 V matrix (seq_len * head_dim)
+        d_v_ptrs[i] = d_v_ptrs[i - 1];
+        if (i % (InfEngineConfig::NUM_Q_HEADS / InfEngineConfig::NUM_KV_HEADS) == 0) {
+            d_v_ptrs[i] += InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
+        }
+
+        // move up by size of 1 A matrix = 1 * seq_len
+        d_a_ptrs[i] = d_a_ptrs[i - 1] + (1 * seq_len);
+        // move up by size of 1 output matrix = 1 * head_dim
+        d_o_ptrs[i] = d_o_ptrs[i - 1] + (1 * InfEngineConfig::HEAD_DIM);
+    }
+}
+
+void multiply_attn_weights_V_decode(cublasHandle_t handle, const int seq_len, half* attn_weights, half* V, half* output, half** d_v_ptrs, half** d_a_ptrs, half** d_o_ptrs) {
     // want to compute attn_weights @ V, call it X = A @ V, however V is broadcasted
     // attn_weights is [n_q_heads, 1, seq_len], v is [n_kv_heads, seq_len, head_dim]
     // output should be [num_q_heads, 1, head_dim]
@@ -221,31 +231,9 @@ void multiply_attn_weights_V_decode(cublasHandle_t handle, const int seq_len, co
     // we will compute X^t = V^t @ A^t, we can feed in V, A and they will be read as transposed
     // dim V^t = [head_dim, seq_len], A^t = [1, seq_len], X^t = [head_dim, 1]
 
-    const half* v_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    const half* a_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    half* o_ptrs[InfEngineConfig::NUM_Q_HEADS];
-    v_ptrs[0] = V;
-    a_ptrs[0] = attn_weights;
-    o_ptrs[0] = output;
-
-    for (int i = 1; i < InfEngineConfig::NUM_Q_HEADS; i++) {
-        // if i % (num_q/num_k) = 0, then move up by 1 V matrix (seq_len * head_dim)
-        v_ptrs[i] = v_ptrs[i - 1];
-        if (i % (InfEngineConfig::NUM_Q_HEADS / InfEngineConfig::NUM_KV_HEADS) == 0) {
-            v_ptrs[i] += InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
-        }
-
-        // move up by size of 1 A matrix = 1 * seq_len
-        a_ptrs[i] = a_ptrs[i - 1] + (1 * seq_len);
-        // move up by size of 1 output matrix = 1 * head_dim
-        o_ptrs[i] = o_ptrs[i - 1] + (1 * InfEngineConfig::HEAD_DIM);
-    }
+    compute_av_mul_pointers_decode<<<1, 1>>>(d_v_ptrs, d_a_ptrs, d_o_ptrs, V, attn_weights, output, seq_len);
 
     float alpha = 1.0f; float beta = 0.0f;
-
-    cudaMemcpy(d_v_ptrs, v_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_a_ptrs, a_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_o_ptrs, o_ptrs, InfEngineConfig::NUM_Q_HEADS * sizeof(half*), cudaMemcpyHostToDevice);
 
     // m: rows in V^t = head_dim, k = cols in V^t = rows in A^t = seq_len, n = cols in A^t = 1
     auto result = cublasGemmBatchedEx(handle,
