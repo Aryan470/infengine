@@ -189,26 +189,23 @@ void multiply_preproj_Wo(cublasHandle_t handle, const int seq_len, const half* d
 size_t attn_workspace_size(int max_seq_len) {
     size_t S = max_seq_len;
     size_t q_bytes = S * InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
-    size_t k_bytes = S * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
-    size_t v_bytes = k_bytes;
     size_t attn_w_bytes = InfEngineConfig::NUM_Q_HEADS * S * S * sizeof(half);
     size_t pre_proj_bytes = q_bytes;
     size_t ptr_bytes = 6 * InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
-    return q_bytes + k_bytes + v_bytes + attn_w_bytes + pre_proj_bytes + ptr_bytes;
+    return q_bytes + attn_w_bytes + pre_proj_bytes + ptr_bytes;
 }
 
-void attn(cublasHandle_t handle, const float* d_rope_cos, const float* d_rope_sin, const int seq_len, half* d_input, half* d_qproj, half* d_kproj, half* d_vproj, half* d_oproj, half* d_output, void* workspace) {
+size_t kv_cache_size() {
+    // [num_layers, 2 (k, v), num_kv_heads, max_seq_len, head_dim]
+    return InfEngineConfig::NUM_LAYERS * 2 * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM * sizeof(half);
+}
+
+void attn(cublasHandle_t handle, const float* d_rope_cos, const float* d_rope_sin, const int seq_len, half* d_input, half* d_qproj, half* d_kproj, half* d_vproj, half* d_oproj, half* d_output, void* workspace, void* kv_cache, const int layer_idx) {
     // unpack workspace
     char* ws = (char*)workspace;
 
     half* Q = (half*)ws;
     ws += seq_len * InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
-
-    half* K = (half*)ws;
-    ws += seq_len * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
-
-    half* V = (half*)ws;
-    ws += seq_len * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
 
     half* d_attn_weights = (half*)ws;
     ws += InfEngineConfig::NUM_Q_HEADS * seq_len * seq_len * sizeof(half);
@@ -227,6 +224,11 @@ void attn(cublasHandle_t handle, const float* d_rope_cos, const float* d_rope_si
     half** av_a_ptrs = (half**)ws;
     ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
     half** av_o_ptrs = (half**)ws;
+
+    // kvcache is [num_layers, 2, num_kv_heads, max_seq_len, head_dim]
+    // K, V entry is offset by the layer ids, each layer has 2 * num_kv_heads * max_seq_len * head_dim halfs
+    half* K = ((half*)kv_cache) + layer_idx * 2 * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
+    half* V = K + InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
 
     // input: [seq_len, hidden_dim]
     // W_k: [n_k_heads * head_dim, hidden_dim]

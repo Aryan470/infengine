@@ -4,7 +4,7 @@
 
 namespace InfEngineConfig {
     static const std::string TOKENIZER_PATH = "models/llama_3.1_8b/tokenizer.json";
-    static const int MAX_CONTEXT_LENGTH = 32768;
+    static const int MAX_CONTEXT_LENGTH = 8192;
     static const int VOCAB_SIZE = 128256;
 
     static const int NUM_LAYERS = 32;
