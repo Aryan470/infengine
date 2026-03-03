@@ -4,7 +4,7 @@
 #include "../config.h"
 #include "../kernels/softmax.cuh"
 
-TEST(ScaleSoftmax, MatchesPyTorch) {
+TEST(ScaleSoftmaxCausal, MatchesPyTorch) {
     // scalesoftmax takes [q_heads, seq_len, seq_len] -> [q_heads, seq_len, seq_len]
     std::vector<__half> input = load_tensor("test_data/scalesoftmax_input.bin");
     std::vector<__half> expected = load_tensor("test_data/scalesoftmax_output.bin");
@@ -20,7 +20,7 @@ TEST(ScaleSoftmax, MatchesPyTorch) {
     cudaMemcpy(d_input, input.data(), InfEngineConfig::HALF_SIZE * input.size(), cudaMemcpyHostToDevice);
     cudaMalloc(&d_actual, output_size_bytes);
 
-    scale_causal_softmax(seq_len, d_input, d_actual);
+    scale_causal_softmax(seq_len, d_input, d_actual, false);
     cudaMemcpy(actual.data(), d_actual, output_size_bytes, cudaMemcpyDeviceToHost);
 
     CompareResult result = compare_tensors(actual.data(), expected.data(), expected.size(), 2e-5);

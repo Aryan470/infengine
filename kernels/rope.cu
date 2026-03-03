@@ -17,26 +17,34 @@ const int HIGH_FREQ_WAVELEN = ORIGINAL_MAX_POS / HIGH_FREQ_FACTOR;
 // K should not exceed HEAD_DIM/2
 const int K = InfEngineConfig::HEAD_DIM/2;
 
-void apply_rope(int num_heads, int seq_len, const float* d_rope_cos, const float* d_rope_sin, __half* d_input, __half* d_output) {
-    apply_rope_kern<<<num_heads * seq_len, K>>>(seq_len, d_rope_cos, d_rope_sin, d_input, d_output);
+void apply_rope(const int start_pos, const int num_heads, const int seq_len, const float* d_rope_cos, const float* d_rope_sin, __half* d_input, __half* d_output, bool is_kv_cache) {
+    apply_rope_kern<<<num_heads * seq_len, K>>>(start_pos, seq_len, d_rope_cos, d_rope_sin, d_input, d_output, is_kv_cache);
 }
 
 /*
     inputs: cos table [max_seq_len, head_dim/2] (sin is same), d_input [num_heads, seq_len, head_dim]
     outputs: d_output [num_heads, seq_len, head_dim]
+    outputs could be strided by (seq_len * head_dim) or by (max_seq_len * head_dim) if operating on kvcache
     one block per token / seq_len, K threads responsible for pairs of the head dim
 */
-__global__ void apply_rope_kern(int seq_len, const float* d_rope_cos, const float* d_rope_sin, half* d_input, half* d_output) {
+__global__ void apply_rope_kern(const int start_pos, const int seq_len, const float* d_rope_cos, const float* d_rope_sin, half* d_input, half* d_output, bool is_kv_cache) {
     const int block_id = blockIdx.x;
     const int threads_per_block = blockDim.x;
     const int thread_id = threadIdx.x;
-    const int seq_offset = block_id % seq_len;
+    const int head_id = block_id / seq_len;
+    const int token_id = block_id % seq_len;
+    const int seq_offset = start_pos + token_id;
 
     // my block is responsible for 128 (HEAD_DIM) entries at d_input[seq_len=block_id][:]
     // i am responsible for (128/2 pairs) / threads_per_block pairs
     const int my_num_pairs = (InfEngineConfig::HEAD_DIM / 2) / threads_per_block;
-    half* block_input = d_input + block_id * InfEngineConfig::HEAD_DIM + thread_id * my_num_pairs;
-    half* block_output = d_output + block_id * InfEngineConfig::HEAD_DIM + thread_id * my_num_pairs;
+    // if it is kv cache, the in/out per head is strided by an additional max_seq_len * head_dim
+    // first figure out where the block is going to operate (jump by either max context length or seq len for each head)
+    const int memory_offset = head_id * (is_kv_cache ? InfEngineConfig::MAX_CONTEXT_LENGTH : seq_len) * InfEngineConfig::HEAD_DIM
+                            + token_id * InfEngineConfig::HEAD_DIM
+                            + thread_id * my_num_pairs;
+    half* block_input = d_input + memory_offset;
+    half* block_output = d_output + memory_offset;
 
     // [seq_len, head_dim/2]
     const float* my_cos = d_rope_cos + seq_offset * InfEngineConfig::HEAD_DIM / 2 + thread_id * my_num_pairs;

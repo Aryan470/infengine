@@ -35,6 +35,8 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
     RequestContext context;
     context.tokens = tokenize(request);
 
+    std::cout << request << std::flush;
+
     // alloc 2 buffers for input
     int* tokenid_buff;
     cudaMalloc((void**)&tokenid_buff, InfEngineConfig::MAX_CONTEXT_LENGTH * sizeof(int));
@@ -61,25 +63,67 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
     cudaProfilerStart();
 
     int max_seq_len = context.tokens.size() + 100;
-    size_t workspace_bytes = std::max(attn_workspace_size(max_seq_len), ffn_workspace_size(max_seq_len));
-    size_t kv_cache_bytes = kv_cache_size();
     void* workspace;
     void* kv_cache;
-    cudaMalloc(&workspace, workspace_bytes);
-    cudaMalloc(&kv_cache, kv_cache_bytes);
+    // we will reuse workspace for both attn and ffn
+    cudaMalloc(&workspace, std::max(attn_workspace_size(max_seq_len), ffn_workspace_size(max_seq_len)));
+    cudaMalloc(&kv_cache, kv_cache_size());
 
-    std::cout << request;
-    for (int num_tokens = 0; num_tokens < 100; num_tokens++) {
-        int seq_len = context.tokens.size();
-        cudaMemcpy(tokenid_buff, context.tokens.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice);
-        emblookup(context.tokens.size(), tokenid_buff, model_weights.emb_lookup, data_buffer);
+    /* PREFILL START */
+    int seq_len = context.tokens.size();
+    cudaMemcpy(tokenid_buff, context.tokens.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice);
+    emblookup(context.tokens.size(), tokenid_buff, model_weights.emb_lookup, data_buffer);
 
+    for (int layer_idx = 0; layer_idx < InfEngineConfig::NUM_LAYERS; layer_idx++) {
+        // apply rmsnorm from data buffer to aux buffer
+        rmsnorm(seq_len, data_buffer, model_weights.layers[layer_idx].input_layernorm, aux_buffer);
+        // apply attn
+        attn(handle, model_weights.rope.cos, model_weights.rope.sin, seq_len, aux_buffer,
+            model_weights.layers[layer_idx].transformer.w_q,
+            model_weights.layers[layer_idx].transformer.w_k,
+            model_weights.layers[layer_idx].transformer.w_v,
+            model_weights.layers[layer_idx].transformer.w_o,
+            attn_buffer, workspace, kv_cache, layer_idx);
 
+        // add into x, copy x back to aux
+        residual_add(seq_len, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
+
+        // apply rmsnorm to aux buffer inplace
+        rmsnorm(seq_len, data_buffer, model_weights.layers[layer_idx].post_attention_layernorm, aux_buffer);
+        // apply ffn
+        ffn(handle, seq_len, aux_buffer, attn_buffer,
+            model_weights.layers[layer_idx].ffn_block.w_up,
+            model_weights.layers[layer_idx].ffn_block.w_down,
+            model_weights.layers[layer_idx].ffn_block.w_gate, workspace);
+        // add back to x
+        residual_add(seq_len, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
+    }
+
+    // apply final norm
+    rmsnorm(seq_len, data_buffer, model_weights.final_norm, data_buffer);
+    lm_head(handle, seq_len, data_buffer, model_weights.lm_head, output_distr);
+    sample_token_amax(output_distr, output_token);
+
+    int final_token;
+    cudaMemcpy(&final_token, output_token, sizeof(int), cudaMemcpyDeviceToHost);
+    context.tokens.push_back(final_token);
+    cudaMemcpy(tokenid_buff + context.tokens.size() - 1, output_token, sizeof(int), cudaMemcpyDeviceToDevice);
+
+    std::cout << detokenize({final_token});
+    std::cout << std::flush;
+    /* PREFILL END */
+
+    /* DECODE START */
+    for (int num_tokens = 1; num_tokens < 1000; num_tokens++) {
+        seq_len = context.tokens.size();
+        // do emblookup into data buffer
+        emblookup(1, tokenid_buff + context.tokens.size() - 1, model_weights.emb_lookup, data_buffer);
         for (int layer_idx = 0; layer_idx < InfEngineConfig::NUM_LAYERS; layer_idx++) {
+            // for most things we can call with seq len 1 to just use the first part of the data/aux buffers
             // apply rmsnorm from data buffer to aux buffer
-            rmsnorm(seq_len, data_buffer, model_weights.layers[layer_idx].input_layernorm, aux_buffer);
-            // apply attn
-            attn(handle, model_weights.rope.cos, model_weights.rope.sin, seq_len, aux_buffer,
+            rmsnorm(1, data_buffer, model_weights.layers[layer_idx].input_layernorm, aux_buffer);
+            // apply decode_attn, need a special codepath
+            decode_attn(handle, model_weights.rope.cos, model_weights.rope.sin, seq_len, aux_buffer,
                 model_weights.layers[layer_idx].transformer.w_q,
                 model_weights.layers[layer_idx].transformer.w_k,
                 model_weights.layers[layer_idx].transformer.w_v,
@@ -87,32 +131,37 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
                 attn_buffer, workspace, kv_cache, layer_idx);
 
             // add into x, copy x back to aux
-            residual_add(seq_len, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
+            residual_add(1, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
 
             // apply rmsnorm to aux buffer inplace
-            rmsnorm(seq_len, data_buffer, model_weights.layers[layer_idx].post_attention_layernorm, aux_buffer);
-            // apply ffn
-            ffn(handle, seq_len, aux_buffer, attn_buffer,
+            rmsnorm(1, data_buffer, model_weights.layers[layer_idx].post_attention_layernorm, aux_buffer);
+            // apply ffn (can use the same codepath)
+            ffn(handle, 1, aux_buffer, attn_buffer,
                 model_weights.layers[layer_idx].ffn_block.w_up,
                 model_weights.layers[layer_idx].ffn_block.w_down,
                 model_weights.layers[layer_idx].ffn_block.w_gate, workspace);
+
             // add back to x
-            residual_add(seq_len, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
+            residual_add(1, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
         }
 
         // apply final norm
-        rmsnorm(seq_len, data_buffer, model_weights.final_norm, data_buffer);
-        lm_head(handle, seq_len, data_buffer, model_weights.lm_head, output_distr);
+        rmsnorm(1, data_buffer, model_weights.final_norm, data_buffer);
+        lm_head(handle, 1, data_buffer, model_weights.lm_head, output_distr);
         sample_token_amax(output_distr, output_token);
 
-        int final_token;
+        // get the token and add to context
         cudaMemcpy(&final_token, output_token, sizeof(int), cudaMemcpyDeviceToHost);
         context.tokens.push_back(final_token);
-        std::string token_str = tokenizer->Decode({final_token});
-        std::cout << token_str;
-        fflush(stdout);
+        cudaMemcpy(tokenid_buff + context.tokens.size() - 1, output_token, sizeof(int), cudaMemcpyDeviceToDevice);
+
+        std::cout << detokenize({final_token});
+        std::cout << std::flush;
     }
     std::cout << std::endl;
+
+    /* DECODE END */
+
     cudaProfilerStop();
     cudaEventRecord(endEvent, 0);
     cudaEventSynchronize(endEvent);
@@ -135,28 +184,6 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
     cublasDestroy(handle);
     return detokenize(context.tokens);
 }
-
-/*std::optional<std::string> Manager::handle_request_future(const std::string& request) {
-    // tokenize the request
-    RequestContext context;
-    context.tokens = tokenize(request);
-
-    // alloc kv cache and token buffers on gpu
-    int init_result = initialize_request_context(&context);
-    if (init_result != 0) {return {};}
-
-    // prefill will build kv cache
-    int prefill_result = initialize_request_context(&context);
-    if (prefill_result != 0) {cleanup_request_context(&context); return {};}
-
-    // call decode kernel, which will just work on kvcache + 
-    int decode_result = decode(&context);
-    if (decode_result != 0) {cleanup_request_context(&context); return {};}
-
-    int cleanup_result = cleanup_request_context(&context);
-    if (cleanup_result != 0) {return {};}
-    return detokenize(context.tokens);
-}*/
 
 std::vector<int> Manager::tokenize(const std::string& text) { return tokenizer->Encode(text); }
 std::string Manager::detokenize(const std::vector<int>& tokens) { return tokenizer->Decode(tokens); }

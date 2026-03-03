@@ -42,8 +42,8 @@ TEST(RoPE, MatchesPyTorch) {
     cudaMemcpy(d_k_input, k_input.data(), InfEngineConfig::HALF_SIZE * k_input.size(), cudaMemcpyHostToDevice);
     cudaMemcpy(d_q_input, q_input.data(), InfEngineConfig::HALF_SIZE * q_input.size(), cudaMemcpyHostToDevice);
 
-    apply_rope(InfEngineConfig::NUM_Q_HEADS,  seq_len, d_rope_cos, d_rope_sin, d_q_input, d_q_output);
-    apply_rope(InfEngineConfig::NUM_KV_HEADS, seq_len, d_rope_cos, d_rope_sin, d_k_input, d_k_output);
+    apply_rope(0, InfEngineConfig::NUM_Q_HEADS,  seq_len, d_rope_cos, d_rope_sin, d_q_input, d_q_output, false);
+    apply_rope(0, InfEngineConfig::NUM_KV_HEADS, seq_len, d_rope_cos, d_rope_sin, d_k_input, d_k_output, false);
 
     cudaMemcpy(actual_q_output.data(), d_q_output, InfEngineConfig::HALF_SIZE * q_output.size(), cudaMemcpyDeviceToHost);
     cudaMemcpy(actual_k_output.data(), d_k_output, InfEngineConfig::HALF_SIZE * k_output.size(), cudaMemcpyDeviceToHost);
