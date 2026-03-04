@@ -123,7 +123,6 @@ __global__ void scale_row_softmax_kern(int seq_len, half* d_input, half* d_outpu
     const int thread_id = threadIdx.x;
     const int num_threads = blockDim.x;
 
-    const int row_idx = block_id % seq_len;
     // row len / num threads, rounded up
     const int stride = num_threads;
 

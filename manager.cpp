@@ -4,15 +4,12 @@
 #include <cublas_v2.h>
 #include <tokenizers_cpp.h>
 #include "manager.h"
-#include "kernels/emblookup.cuh"
-#include "kernels/lm_head.cuh"
 #include "kernels/model_weights.cuh"
-#include "kernels/residual_add.cuh"
-#include "kernels/rmsnorm.cuh"
 #include "kernels/attn.cuh"
 #include "kernels/ffn.cuh"
 #include "config.h"
-#include "kernels/sampling.cuh"
+#include "prefill.cuh"
+#include "decode.cuh"
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -69,98 +66,25 @@ std::optional<std::string> Manager::handle_request(const std::string& request) {
     cudaMalloc(&workspace, std::max(attn_workspace_size(max_seq_len), ffn_workspace_size(max_seq_len)));
     cudaMalloc(&kv_cache, kv_cache_size());
 
-    /* PREFILL START */
+    /* PREFILL */
     int seq_len = context.tokens.size();
     cudaMemcpy(tokenid_buff, context.tokens.data(), seq_len * sizeof(int), cudaMemcpyHostToDevice);
-    emblookup(context.tokens.size(), tokenid_buff, model_weights.emb_lookup, data_buffer);
-
-    for (int layer_idx = 0; layer_idx < InfEngineConfig::NUM_LAYERS; layer_idx++) {
-        // apply rmsnorm from data buffer to aux buffer
-        rmsnorm(seq_len, data_buffer, model_weights.layers[layer_idx].input_layernorm, aux_buffer);
-        // apply attn
-        attn(handle, model_weights.rope.cos, model_weights.rope.sin, seq_len, aux_buffer,
-            model_weights.layers[layer_idx].transformer.w_q,
-            model_weights.layers[layer_idx].transformer.w_k,
-            model_weights.layers[layer_idx].transformer.w_v,
-            model_weights.layers[layer_idx].transformer.w_o,
-            attn_buffer, workspace, kv_cache, layer_idx);
-
-        // add into x, copy x back to aux
-        residual_add(seq_len, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
-
-        // apply rmsnorm to aux buffer inplace
-        rmsnorm(seq_len, data_buffer, model_weights.layers[layer_idx].post_attention_layernorm, aux_buffer);
-        // apply ffn
-        ffn(handle, seq_len, aux_buffer, attn_buffer,
-            model_weights.layers[layer_idx].ffn_block.w_up,
-            model_weights.layers[layer_idx].ffn_block.w_down,
-            model_weights.layers[layer_idx].ffn_block.w_gate, workspace);
-        // add back to x
-        residual_add(seq_len, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
-    }
-
-    // apply final norm
-    rmsnorm(seq_len, data_buffer, model_weights.final_norm, data_buffer);
-    lm_head(handle, seq_len, data_buffer, model_weights.lm_head, output_distr);
-    sample_token_amax(output_distr, output_token);
-
-    int final_token;
-    cudaMemcpy(&final_token, output_token, sizeof(int), cudaMemcpyDeviceToHost);
+    int final_token = prefill(handle, model_weights, seq_len, tokenid_buff,
+        data_buffer, aux_buffer, attn_buffer, output_distr, output_token, workspace, kv_cache);
     context.tokens.push_back(final_token);
     cudaMemcpy(tokenid_buff + context.tokens.size() - 1, output_token, sizeof(int), cudaMemcpyDeviceToDevice);
+    std::cout << detokenize({final_token}) << std::flush;
 
-    std::cout << detokenize({final_token});
-    std::cout << std::flush;
-    /* PREFILL END */
-
-    /* DECODE START */
+    /* DECODE */
     for (int num_tokens = 1; num_tokens < 1000; num_tokens++) {
         seq_len = context.tokens.size();
-        // do emblookup into data buffer
-        emblookup(1, tokenid_buff + context.tokens.size() - 1, model_weights.emb_lookup, data_buffer);
-        for (int layer_idx = 0; layer_idx < InfEngineConfig::NUM_LAYERS; layer_idx++) {
-            // for most things we can call with seq len 1 to just use the first part of the data/aux buffers
-            // apply rmsnorm from data buffer to aux buffer
-            rmsnorm(1, data_buffer, model_weights.layers[layer_idx].input_layernorm, aux_buffer);
-            // apply decode_attn, need a special codepath
-            decode_attn(handle, model_weights.rope.cos, model_weights.rope.sin, seq_len, aux_buffer,
-                model_weights.layers[layer_idx].transformer.w_q,
-                model_weights.layers[layer_idx].transformer.w_k,
-                model_weights.layers[layer_idx].transformer.w_v,
-                model_weights.layers[layer_idx].transformer.w_o,
-                attn_buffer, workspace, kv_cache, layer_idx);
-
-            // add into x, copy x back to aux
-            residual_add(1, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
-
-            // apply rmsnorm to aux buffer inplace
-            rmsnorm(1, data_buffer, model_weights.layers[layer_idx].post_attention_layernorm, aux_buffer);
-            // apply ffn (can use the same codepath)
-            ffn(handle, 1, aux_buffer, attn_buffer,
-                model_weights.layers[layer_idx].ffn_block.w_up,
-                model_weights.layers[layer_idx].ffn_block.w_down,
-                model_weights.layers[layer_idx].ffn_block.w_gate, workspace);
-
-            // add back to x
-            residual_add(1, InfEngineConfig::HIDDEN_SIZE, data_buffer, attn_buffer);
-        }
-
-        // apply final norm
-        rmsnorm(1, data_buffer, model_weights.final_norm, data_buffer);
-        lm_head(handle, 1, data_buffer, model_weights.lm_head, output_distr);
-        sample_token_amax(output_distr, output_token);
-
-        // get the token and add to context
-        cudaMemcpy(&final_token, output_token, sizeof(int), cudaMemcpyDeviceToHost);
+        final_token = decode_step(handle, model_weights, seq_len, tokenid_buff,
+            data_buffer, aux_buffer, attn_buffer, output_distr, output_token, workspace, kv_cache);
         context.tokens.push_back(final_token);
         cudaMemcpy(tokenid_buff + context.tokens.size() - 1, output_token, sizeof(int), cudaMemcpyDeviceToDevice);
-
-        std::cout << detokenize({final_token});
-        std::cout << std::flush;
+        std::cout << detokenize({final_token}) << std::flush;
     }
     std::cout << std::endl;
-
-    /* DECODE END */
 
     cudaProfilerStop();
     cudaEventRecord(endEvent, 0);
