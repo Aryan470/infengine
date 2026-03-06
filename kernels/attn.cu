@@ -292,6 +292,20 @@ void multiply_preproj_Wo(cublasHandle_t handle, const int seq_len, const half* d
     }
 }
 
+static const int QKV_DIM = InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM
+                         + 2 * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM;  // 6144
+
+size_t verify_attn_workspace_size(int N_draft, int total_seq_len) {
+    size_t S = N_draft;
+    size_t T = total_seq_len;
+    // qkv_out: fused GEMM output, also reused for attn@V output and Q
+    size_t qkv_bytes = S * QKV_DIM * sizeof(half);
+    size_t attn_w_bytes = (size_t)InfEngineConfig::NUM_Q_HEADS * S * T * sizeof(half);
+    size_t pre_proj_bytes = S * InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
+    size_t ptr_bytes = 6 * InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    return qkv_bytes + attn_w_bytes + pre_proj_bytes + ptr_bytes;
+}
+
 size_t attn_workspace_size(int max_seq_len) {
     size_t S = max_seq_len;
     size_t q_bytes = S * InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
@@ -436,4 +450,206 @@ void decode_attn(cublasHandle_t handle, const float* d_rope_cos, const float* d_
     // buffer @ W_o -> [seq_len, num_heads * head_dim=hidden_dim] @ [hidden_dim, hidden_dim] into output buffer [seq_len, hidden_dim]
     // simple matmul
     multiply_preproj_Wo(handle, 1, d_attended, d_oproj, d_output);
+}
+
+// --- Verify attention for speculative decoding ---
+
+__global__ void compute_qkt_mul_pointers_verify(half** d_q_ptrs, half** d_k_ptrs, half** d_o_ptrs,
+                                                 half* Q, half* K, half* d_QKt_buffer,
+                                                 const int N_draft, const int total_seq_len) {
+    d_q_ptrs[0] = Q;
+    d_k_ptrs[0] = K;
+    d_o_ptrs[0] = d_QKt_buffer;
+
+    for (int i = 1; i < InfEngineConfig::NUM_Q_HEADS; i++) {
+        // Q is in token-major layout [N_draft, QKV_DIM]: head stride = HEAD_DIM
+        d_q_ptrs[i] = d_q_ptrs[i - 1] + InfEngineConfig::HEAD_DIM;
+        // K: advance KV head every NUM_Q_HEADS/NUM_KV_HEADS
+        d_k_ptrs[i] = d_k_ptrs[i - 1];
+        if (i % (InfEngineConfig::NUM_Q_HEADS / InfEngineConfig::NUM_KV_HEADS) == 0) {
+            d_k_ptrs[i] += InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
+        }
+        // Output stride: N_draft * total_seq_len per head
+        d_o_ptrs[i] = d_o_ptrs[i - 1] + ((size_t)N_draft * total_seq_len);
+    }
+}
+
+void multiply_QKt_verify(cublasHandle_t handle, half* Q, half* K, half* d_QKt_buffer,
+                          int N_draft, int total_seq_len,
+                          half** d_q_ptrs, half** d_k_ptrs, half** d_o_ptrs) {
+    compute_qkt_mul_pointers_verify<<<1, 1>>>(d_q_ptrs, d_k_ptrs, d_o_ptrs, Q, K, d_QKt_buffer, N_draft, total_seq_len);
+
+    float alpha = 1.0f; float beta = 0.0f;
+    // X = Q @ K^T -> X^T = K @ Q^T
+    // m = total_seq_len (rows of K), k = HEAD_DIM, n = N_draft (cols of Q^T)
+    // Q is token-major from fused QKV: ldb = QKV_DIM (6144)
+    const int QKV_STRIDE = InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM
+                         + 2 * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM;
+    auto result = cublasGemmBatchedEx(handle,
+        CUBLAS_OP_T, CUBLAS_OP_N,
+        total_seq_len, N_draft, InfEngineConfig::HEAD_DIM,
+        &alpha,
+        (const void**) d_k_ptrs, CUDA_R_16F, InfEngineConfig::HEAD_DIM,
+        (const void**) d_q_ptrs, CUDA_R_16F, QKV_STRIDE,
+        &beta,
+        (void**) d_o_ptrs, CUDA_R_16F, total_seq_len,
+        InfEngineConfig::NUM_Q_HEADS, CUDA_R_32F, CUBLAS_GEMM_DEFAULT);
+
+    if (result != CUBLAS_STATUS_SUCCESS) {
+        printf("cublasGemmBatchedEx failed in verify QK^T with error code %d\n", result);
+    }
+}
+
+__global__ void compute_av_mul_pointers_verify(half** d_v_ptrs, half** d_a_ptrs, half** d_o_ptrs,
+                                                half* V, half* attn_weights, half* output,
+                                                const int N_draft, const int total_seq_len) {
+    d_v_ptrs[0] = V;
+    d_a_ptrs[0] = attn_weights;
+    d_o_ptrs[0] = output;
+
+    for (int i = 1; i < InfEngineConfig::NUM_Q_HEADS; i++) {
+        d_v_ptrs[i] = d_v_ptrs[i - 1];
+        if (i % (InfEngineConfig::NUM_Q_HEADS / InfEngineConfig::NUM_KV_HEADS) == 0) {
+            d_v_ptrs[i] += InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
+        }
+        d_a_ptrs[i] = d_a_ptrs[i - 1] + ((size_t)N_draft * total_seq_len);
+        d_o_ptrs[i] = d_o_ptrs[i - 1] + (N_draft * InfEngineConfig::HEAD_DIM);
+    }
+}
+
+// Scatter K,V from fused QKV GEMM output [QKV_DIM, N_draft] into KV cache
+// K is at row offset Q_DIM, V at row offset Q_DIM + KV_DIM_ONE
+__global__ void scatter_kv_to_cache_kern(const half* __restrict__ qkv_out, half* K_cache, half* V_cache,
+                                          int N_draft, int seq_len) {
+    const int Q_DIM = InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM;     // 4096
+    const int KV_DIM_ONE = InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM; // 1024
+    const int QKV_STRIDE = Q_DIM + 2 * KV_DIM_ONE;                                   // 6144
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N_draft * KV_DIM_ONE;
+    if (idx >= total) return;
+
+    int d = idx % InfEngineConfig::HEAD_DIM;           // dim within head
+    int tmp = idx / InfEngineConfig::HEAD_DIM;
+    int kv_head = tmp % InfEngineConfig::NUM_KV_HEADS; // which KV head
+    int j = tmp / InfEngineConfig::NUM_KV_HEADS;       // which draft token
+
+    // Source: qkv_out column j, K at row Q_DIM + kv_head*HEAD_DIM + d
+    int k_src = j * QKV_STRIDE + Q_DIM + kv_head * InfEngineConfig::HEAD_DIM + d;
+    int v_src = k_src + KV_DIM_ONE;
+
+    // Dest: KV cache [kv_head, max_seq_len, head_dim], writing at position seq_len + j
+    int cache_dst = kv_head * InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM
+                  + (seq_len + j) * InfEngineConfig::HEAD_DIM + d;
+
+    K_cache[cache_dst] = qkv_out[k_src];
+    V_cache[cache_dst] = qkv_out[v_src];
+}
+
+void multiply_attn_weights_V_verify(cublasHandle_t handle, int N_draft, int total_seq_len,
+                                     half* attn_weights, half* V, half* output,
+                                     half** d_v_ptrs, half** d_a_ptrs, half** d_o_ptrs) {
+    compute_av_mul_pointers_verify<<<1, 1>>>(d_v_ptrs, d_a_ptrs, d_o_ptrs, V, attn_weights, output, N_draft, total_seq_len);
+
+    float alpha = 1.0f; float beta = 0.0f;
+    // X = attn @ V, compute X^T = V^T @ attn^T
+    // m = HEAD_DIM, k = total_seq_len, n = N_draft
+    auto result = cublasGemmBatchedEx(handle,
+        CUBLAS_OP_N, CUBLAS_OP_N,
+        InfEngineConfig::HEAD_DIM, N_draft, total_seq_len,
+        &alpha,
+        (const void**) d_v_ptrs, CUDA_R_16F, InfEngineConfig::HEAD_DIM,
+        (const void**) d_a_ptrs, CUDA_R_16F, total_seq_len,
+        &beta,
+        (void**) d_o_ptrs, CUDA_R_16F, InfEngineConfig::HEAD_DIM,
+        InfEngineConfig::NUM_Q_HEADS, CUDA_R_32F, CUBLAS_GEMM_DEFAULT);
+
+    if (result != CUBLAS_STATUS_SUCCESS) {
+        printf("cublasGemmBatchedEx failed in verify attn@V with error code %d\n", result);
+    }
+}
+
+void verify_attn(cublasHandle_t handle, const float* d_rope_cos, const float* d_rope_sin,
+                 int seq_len, int N_draft,
+                 const int* d_positions, const int8_t* d_tree_mask,
+                 half* d_input, half* d_qkv_proj, half* d_oproj,
+                 half* d_output, void* workspace, void* kv_cache, int layer_idx) {
+    int total_seq_len = seq_len + N_draft;
+
+    // Unpack workspace
+    char* ws = (char*)workspace;
+    half* qkv_out = (half*)ws;
+    ws += (size_t)N_draft * QKV_DIM * sizeof(half);
+
+    half* d_attn_weights = (half*)ws;
+    ws += (size_t)InfEngineConfig::NUM_Q_HEADS * N_draft * total_seq_len * sizeof(half);
+
+    half* d_pre_proj = (half*)ws;
+    ws += (size_t)N_draft * InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM * sizeof(half);
+
+    half** qkt_q_ptrs = (half**)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    half** qkt_k_ptrs = (half**)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    half** qkt_o_ptrs = (half**)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    half** av_v_ptrs = (half**)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    half** av_a_ptrs = (half**)ws;
+    ws += InfEngineConfig::NUM_Q_HEADS * sizeof(half*);
+    half** av_o_ptrs = (half**)ws;
+
+    // KV cache pointers
+    half* K_cache = ((half*)kv_cache) + layer_idx * 2 * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
+    half* V_cache = K_cache + InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM;
+
+    // Fused QKV projection: W_qkv^T @ input -> [QKV_DIM, N_draft] column-major
+    // Output layout per token column: Q[0:4095], K[4096:5119], V[5120:6143]
+    {
+        float alpha_v = 1.0f, beta_v = 0.0f;
+        cublasGemmEx(handle,
+            CUBLAS_OP_T, CUBLAS_OP_N,
+            QKV_DIM, N_draft, InfEngineConfig::HIDDEN_SIZE,
+            &alpha_v,
+            d_qkv_proj, CUDA_R_16F, InfEngineConfig::HIDDEN_SIZE,
+            d_input, CUDA_R_16F, InfEngineConfig::HIDDEN_SIZE,
+            &beta_v,
+            qkv_out, CUDA_R_16F, QKV_DIM,
+            CUDA_R_32F, CUBLAS_GEMM_DEFAULT);
+    }
+
+    // Scatter K,V from fused output into KV cache
+    {
+        int total = N_draft * InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM;
+        int threads = 256;
+        int blocks = (total + threads - 1) / threads;
+        scatter_kv_to_cache_kern<<<blocks, threads>>>(qkv_out, K_cache, V_cache, N_draft, seq_len);
+    }
+
+    // Q is at the start of qkv_out, token-major with stride QKV_DIM
+    half* Q = qkv_out;
+
+    // Apply RoPE with per-token positions
+    // K: apply directly on KV cache at the newly written positions
+    half* K_write = K_cache + seq_len * InfEngineConfig::HEAD_DIM;
+    apply_rope_positions(d_positions, InfEngineConfig::NUM_KV_HEADS, N_draft, d_rope_cos, d_rope_sin, K_write, K_write, true);
+    // Q: token-major with head_stride=HEAD_DIM, token_stride=QKV_DIM
+    apply_rope_positions_strided(d_positions, InfEngineConfig::NUM_Q_HEADS, N_draft, d_rope_cos, d_rope_sin, Q, Q,
+                                 InfEngineConfig::HEAD_DIM, QKV_DIM);
+
+    // Q @ K^T
+    multiply_QKt_verify(handle, Q, K_cache, d_attn_weights, N_draft, total_seq_len, qkt_q_ptrs, qkt_k_ptrs, qkt_o_ptrs);
+
+    // Tree-masked softmax
+    tree_masked_softmax(N_draft, seq_len, d_attn_weights, d_attn_weights, d_tree_mask);
+
+    // Attn weights @ V — reuse qkv_out buffer (Q/K/V data no longer needed)
+    half* d_attended = qkv_out;
+    multiply_attn_weights_V_verify(handle, N_draft, total_seq_len, d_attn_weights, V_cache, d_attended, av_v_ptrs, av_a_ptrs, av_o_ptrs);
+
+    // Permute [NUM_Q_HEADS, N_draft, HEAD_DIM] -> [N_draft, NUM_Q_HEADS, HEAD_DIM]
+    attn_permute(N_draft, d_attended, d_pre_proj);
+
+    // Wo projection
+    multiply_preproj_Wo(handle, N_draft, d_pre_proj, d_oproj, d_output);
 }

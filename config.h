@@ -18,6 +18,8 @@ namespace InfEngineConfig {
 
     static const int HALF_SIZE = 2;
 
+    static const int MAX_DRAFT_NODES = 256;
+
     static const std::vector<std::string> MODEL_FILES = {
         "models/llama_3.1_8b/model-00001-of-00004.safetensors",
         "models/llama_3.1_8b/model-00002-of-00004.safetensors",

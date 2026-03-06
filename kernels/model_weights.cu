@@ -150,6 +150,27 @@ ModelWeights ModelWeights::from_safetensors(std::vector<std::string> safetensors
 
     // ensure that we have populated each pointer
     if (!check_all_present(m)) { throw std::runtime_error("ModelWeights: not all required pointers are present after loading from safetensors."); }
+
+    // Fuse QKV weights: [HIDDEN_SIZE, Q_DIM + K_DIM + V_DIM] column-major
+    // = [4096, 6144] so that CUBLAS_OP_T produces [6144, N] output
+    const size_t Q_DIM = InfEngineConfig::NUM_Q_HEADS * InfEngineConfig::HEAD_DIM;   // 4096
+    const size_t K_DIM = InfEngineConfig::NUM_KV_HEADS * InfEngineConfig::HEAD_DIM;  // 1024
+    const size_t V_DIM = K_DIM;                                                       // 1024
+    const size_t QKV_DIM = Q_DIM + K_DIM + V_DIM;                                    // 6144
+    const size_t H = InfEngineConfig::HIDDEN_SIZE;                                    // 4096
+
+    for (int i = 0; i < InfEngineConfig::NUM_LAYERS; i++) {
+        auto& t = m.layers[i].transformer;
+        cudaMalloc(&t.w_qkv, QKV_DIM * H * sizeof(half));
+        // w_q is [H, Q_DIM] col-major → copy to columns 0..Q_DIM-1
+        cudaMemcpy(t.w_qkv, t.w_q, H * Q_DIM * sizeof(half), cudaMemcpyDeviceToDevice);
+        // w_k is [H, K_DIM] col-major → copy to columns Q_DIM..Q_DIM+K_DIM-1
+        cudaMemcpy(t.w_qkv + H * Q_DIM, t.w_k, H * K_DIM * sizeof(half), cudaMemcpyDeviceToDevice);
+        // w_v is [H, V_DIM] col-major → copy to columns Q_DIM+K_DIM..QKV_DIM-1
+        cudaMemcpy(t.w_qkv + H * (Q_DIM + K_DIM), t.w_v, H * V_DIM * sizeof(half), cudaMemcpyDeviceToDevice);
+    }
+    cudaDeviceSynchronize();
+
     return m;
 }
 
@@ -161,6 +182,7 @@ void ModelWeights::free() {
         cudaFree(layers[i].transformer.w_q);
         cudaFree(layers[i].transformer.w_v);
         cudaFree(layers[i].transformer.w_o);
+        if (layers[i].transformer.w_qkv) cudaFree(layers[i].transformer.w_qkv);
         cudaFree(layers[i].post_attention_layernorm);
         cudaFree(layers[i].ffn_block.w_up);
         cudaFree(layers[i].ffn_block.w_gate);

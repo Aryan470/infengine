@@ -56,3 +56,37 @@ void sample_token_amax(const half* d_logits, int* d_output) {
     const int shmem_size = (sizeof(half) + sizeof(int)) * K;
     amax_kern<<<1, K, shmem_size>>>(d_logits, d_output);
 }
+
+__global__ void amax_kern_batched(const half* d_logits, int* d_out, int N) {
+    extern __shared__ char shmem[];
+    const int num_threads = blockDim.x;
+    const int thread_id = threadIdx.x;
+    const int row = blockIdx.x;
+    if (row >= N) return;
+
+    const half* my_logits = d_logits + (size_t)row * InfEngineConfig::VOCAB_SIZE;
+
+    int* amax_space = (int*) shmem;
+    half* max_space = (half*) (shmem + sizeof(int) * num_threads);
+
+    int local_amax = thread_id;
+    half local_max = my_logits[thread_id];
+
+    for (int i = thread_id + num_threads; i < InfEngineConfig::VOCAB_SIZE; i += num_threads) {
+        half this_val = my_logits[i];
+        if (this_val > local_max) {
+            local_amax = i;
+            local_max = this_val;
+        }
+    }
+
+    int result = reduce_amax(local_amax, local_max, amax_space, max_space);
+    if (thread_id == 0) {
+        d_out[row] = result;
+    }
+}
+
+void sample_tokens_amax(const half* d_logits, int* d_output, int N) {
+    const int shmem_size = (sizeof(half) + sizeof(int)) * K;
+    amax_kern_batched<<<N, K, shmem_size>>>(d_logits, d_output, N);
+}

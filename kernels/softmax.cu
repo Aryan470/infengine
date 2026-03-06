@@ -106,6 +106,108 @@ __global__ void scale_causal_softmax_kern(int seq_len, half* d_input, half* d_ou
     }
 }
 
+__global__ void tree_masked_softmax_kern(int N_draft, int seq_len, int total_seq_len, half* d_input, half* d_output, const int8_t* d_tree_mask) {
+    extern __shared__ float raw_shmem[];
+    float* reduce_space = raw_shmem;
+    // No data_space in shmem for this kernel — total_seq_len can be large
+    // We use register-based multi-pass approach
+
+    // Each block handles one row: block_id = head_id * N_draft + draft_token_idx
+    const int block_id = blockIdx.x;
+    const int thread_id = threadIdx.x;
+    const int num_threads = blockDim.x;
+
+    const int draft_idx = block_id % N_draft;  // which draft token row
+
+    half* row_input = d_input + (size_t)block_id * total_seq_len;
+    half* row_output = d_output + (size_t)block_id * total_seq_len;
+    const int8_t* my_mask = d_tree_mask + draft_idx * N_draft;  // [N_draft]
+
+    const float scale_value = rsqrt(1.0f * InfEngineConfig::HEAD_DIM);
+
+    // Pass 1: find max
+    float local_max = -INFINITY;
+    for (int i = thread_id; i < total_seq_len; i += num_threads) {
+        float val;
+        if (i < seq_len) {
+            // Always visible (prefix KV cache)
+            val = __half2float(row_input[i]) * scale_value;
+        } else {
+            int draft_col = i - seq_len;
+            if (my_mask[draft_col]) {
+                val = __half2float(row_input[i]) * scale_value;
+            } else {
+                val = -INFINITY;
+            }
+        }
+        if (val > local_max) local_max = val;
+    }
+
+    // Reduce max
+    reduce_space[thread_id] = local_max;
+    __syncthreads();
+    for (int delta = num_threads / 2; delta > 0; delta >>= 1) {
+        if (thread_id < delta) {
+            reduce_space[thread_id] = fmaxf(reduce_space[thread_id], reduce_space[thread_id + delta]);
+        }
+        __syncthreads();
+    }
+    float global_max = reduce_space[0];
+
+    // Pass 2: exponentiate and sum
+    float local_sum = 0.0f;
+    for (int i = thread_id; i < total_seq_len; i += num_threads) {
+        float val;
+        if (i < seq_len) {
+            val = __half2float(row_input[i]) * scale_value;
+        } else {
+            int draft_col = i - seq_len;
+            if (my_mask[draft_col]) {
+                val = __half2float(row_input[i]) * scale_value;
+            } else {
+                val = -INFINITY;
+            }
+        }
+        float exp_val = expf(val - global_max);
+        local_sum += exp_val;
+    }
+
+    // Reduce sum
+    reduce_space[thread_id] = local_sum;
+    __syncthreads();
+    for (int delta = num_threads / 2; delta > 0; delta >>= 1) {
+        if (thread_id < delta) {
+            reduce_space[thread_id] += reduce_space[thread_id + delta];
+        }
+        __syncthreads();
+    }
+    float inv_sum = 1.0f / reduce_space[0];
+
+    // Pass 3: normalize and write
+    for (int i = thread_id; i < total_seq_len; i += num_threads) {
+        float val;
+        if (i < seq_len) {
+            val = __half2float(row_input[i]) * scale_value;
+        } else {
+            int draft_col = i - seq_len;
+            if (my_mask[draft_col]) {
+                val = __half2float(row_input[i]) * scale_value;
+            } else {
+                val = -INFINITY;
+            }
+        }
+        float exp_val = expf(val - global_max);
+        row_output[i] = __float2half(exp_val * inv_sum);
+    }
+}
+
+void tree_masked_softmax(int N_draft, int seq_len, half* d_input, half* d_output, const int8_t* d_tree_mask) {
+    int total_seq_len = seq_len + N_draft;
+    int num_blocks = InfEngineConfig::NUM_Q_HEADS * N_draft;
+    int shmem_size = K * sizeof(float);
+    tree_masked_softmax_kern<<<num_blocks, K, shmem_size>>>(N_draft, seq_len, total_seq_len, d_input, d_output, d_tree_mask);
+}
+
 __global__ void scale_row_softmax_kern(int seq_len, half* d_input, half* d_output) {
     extern __shared__ float raw_shmem[];
     // where we do reductions (max, sum)

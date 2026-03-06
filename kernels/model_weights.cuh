@@ -4,7 +4,7 @@
 #include <cuda_fp16.h>
 #include "../config.h"
 
-struct TransformerBlockWeights { half* w_k; half* w_q; half* w_v; half* w_o; };
+struct TransformerBlockWeights { half* w_k; half* w_q; half* w_v; half* w_o; half* w_qkv = nullptr; };
 struct FFNBlockWeights { half* w_up; half* w_gate; half* w_down; };
 struct RoPEWeights { float* cos; float* sin; };
 

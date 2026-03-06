@@ -65,6 +65,76 @@ __global__ void apply_rope_kern(const int start_pos, const int seq_len, const fl
     }
 }
 
+void apply_rope_positions(const int* d_positions, int num_heads, int seq_len,
+                          const float* d_rope_cos, const float* d_rope_sin,
+                          half* d_input, half* d_output, bool is_kv_cache) {
+    apply_rope_positions_kern<<<num_heads * seq_len, K>>>(d_positions, seq_len, d_rope_cos, d_rope_sin, d_input, d_output, is_kv_cache);
+}
+
+__global__ void apply_rope_positions_kern(const int* d_positions, const int seq_len, const float* d_rope_cos, const float* d_rope_sin, half* d_input, half* d_output, bool is_kv_cache) {
+    const int block_id = blockIdx.x;
+    const int threads_per_block = blockDim.x;
+    const int thread_id = threadIdx.x;
+    const int head_id = block_id / seq_len;
+    const int token_id = block_id % seq_len;
+    const int seq_offset = d_positions[token_id];
+
+    const int my_num_pairs = (InfEngineConfig::HEAD_DIM / 2) / threads_per_block;
+    const int memory_offset = head_id * (is_kv_cache ? InfEngineConfig::MAX_CONTEXT_LENGTH : seq_len) * InfEngineConfig::HEAD_DIM
+                            + token_id * InfEngineConfig::HEAD_DIM
+                            + thread_id * my_num_pairs;
+    half* block_input = d_input + memory_offset;
+    half* block_output = d_output + memory_offset;
+
+    const float* my_cos = d_rope_cos + seq_offset * InfEngineConfig::HEAD_DIM / 2 + thread_id * my_num_pairs;
+    const float* my_sin = d_rope_sin + seq_offset * InfEngineConfig::HEAD_DIM / 2 + thread_id * my_num_pairs;
+
+    for (int i = 0; i < my_num_pairs; i++) {
+        const int x = 2 * i;
+        const int y = x + InfEngineConfig::HEAD_DIM / 2;
+        float a = __half2float(block_input[x]);
+        float b = __half2float(block_input[y]);
+        block_output[x] = __float2half(a * my_cos[i] - b * my_sin[i]);
+        block_output[y] = __float2half(a * my_sin[i] + b * my_cos[i]);
+    }
+}
+
+void apply_rope_positions_strided(const int* d_positions, int num_heads, int seq_len,
+                                  const float* d_rope_cos, const float* d_rope_sin,
+                                  half* d_input, half* d_output,
+                                  int head_stride, int token_stride) {
+    apply_rope_positions_strided_kern<<<num_heads * seq_len, K>>>(d_positions, seq_len, d_rope_cos, d_rope_sin, d_input, d_output, head_stride, token_stride);
+}
+
+__global__ void apply_rope_positions_strided_kern(const int* d_positions, const int seq_len,
+                                                   const float* d_rope_cos, const float* d_rope_sin,
+                                                   half* d_input, half* d_output,
+                                                   int head_stride, int token_stride) {
+    const int block_id = blockIdx.x;
+    const int threads_per_block = blockDim.x;
+    const int thread_id = threadIdx.x;
+    const int head_id = block_id / seq_len;
+    const int token_id = block_id % seq_len;
+    const int seq_offset = d_positions[token_id];
+
+    const int my_num_pairs = (InfEngineConfig::HEAD_DIM / 2) / threads_per_block;
+    const int memory_offset = head_id * head_stride + token_id * token_stride + thread_id * my_num_pairs;
+    half* block_input = d_input + memory_offset;
+    half* block_output = d_output + memory_offset;
+
+    const float* my_cos = d_rope_cos + seq_offset * InfEngineConfig::HEAD_DIM / 2 + thread_id * my_num_pairs;
+    const float* my_sin = d_rope_sin + seq_offset * InfEngineConfig::HEAD_DIM / 2 + thread_id * my_num_pairs;
+
+    for (int i = 0; i < my_num_pairs; i++) {
+        const int x = 2 * i;
+        const int y = x + InfEngineConfig::HEAD_DIM / 2;
+        float a = __half2float(block_input[x]);
+        float b = __half2float(block_input[y]);
+        block_output[x] = __float2half(a * my_cos[i] - b * my_sin[i]);
+        block_output[y] = __float2half(a * my_sin[i] + b * my_cos[i]);
+    }
+}
+
 void init_rope_buffer(float** cu_rope_cos, float** cu_rope_sin) {
     // each table is [max_seq_len, headdim/2]
     const int table_size = InfEngineConfig::MAX_CONTEXT_LENGTH * InfEngineConfig::HEAD_DIM / 2;
